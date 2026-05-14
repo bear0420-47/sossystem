@@ -11,53 +11,80 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// wsClient represents a connected WebSocket client
-type wsClient struct {
-	send chan []byte
+// ── SSE Hub ───────────────────────────────────────────────────────────────────
+// sseClient คือ connection ของ User 1 คนที่เปิด SSE ค้างไว้
+// แต่ละ client subscribe เฉพาะ ticketID ของตัวเองเท่านั้น
+type sseClient struct {
+	ticketID string     // กรองเฉพาะ ticket ที่ตัวเองสนใจ
+	send     chan []byte // channel สำหรับส่ง event ไปยัง client
 }
 
-// Hub manages all active WebSocket connections for real-time broadcast
+// Hub เก็บ SSE clients ทั้งหมดที่กำลัง connect อยู่
 type Hub struct {
 	mu      sync.RWMutex
-	clients map[*wsClient]bool
+	clients map[*sseClient]bool
 }
 
 var globalHub = &Hub{
-	clients: make(map[*wsClient]bool),
+	clients: make(map[*sseClient]bool),
 }
 
-func (h *Hub) Register(c *wsClient) {
+func (h *Hub) Register(c *sseClient) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.clients[c] = true
+	log.Printf("[SSE Hub] Client registered for ticket: %s (total: %d)", c.ticketID, len(h.clients))
 }
 
-func (h *Hub) Unregister(c *wsClient) {
+func (h *Hub) Unregister(c *sseClient) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.clients, c)
-	close(c.send)
+	if _, ok := h.clients[c]; ok {
+		delete(h.clients, c)
+		close(c.send)
+		log.Printf("[SSE Hub] Client unregistered for ticket: %s (total: %d)", c.ticketID, len(h.clients))
+	}
 }
 
-func (h *Hub) Broadcast(msg []byte) {
+// BroadcastToTicket ส่ง event ไปยัง:
+//   - User ที่ subscribe ticketID นั้น (เจ้าของ ticket)
+//   - Admin dashboard ที่ใช้ wildcard ticketID = "*"
+func (h *Hub) BroadcastToTicket(ticketID string, msg []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {
-		select {
-		case c.send <- msg:
-		default:
-			// Client too slow — skip this cycle
+		if c.ticketID == ticketID || c.ticketID == "*" {
+			select {
+			case c.send <- msg:
+			default:
+				// client channel เต็ม — ข้าม
+			}
 		}
 	}
 }
 
-// Service defines all business logic for the SOS system
+// BroadcastAll ส่งไปยัง admin dashboard (ticketID = "*") เท่านั้น
+// ใช้เมื่อมี ticket ใหม่เข้ามา → admin เห็นทันที
+func (h *Hub) BroadcastAll(msg []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		if c.ticketID == "*" {
+			select {
+			case c.send <- msg:
+			default:
+			}
+		}
+	}
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
 type Service interface {
 	CreateTicket(ctx context.Context, req CreateTicketRequest) (*TicketResponse, error)
 	GetAllTickets(ctx context.Context) ([]TicketResponse, error)
 	GetTicket(ctx context.Context, ticketID string) (*TicketResponse, error)
-	AcknowledgeTicket(ctx context.Context, ticketID string) (*TicketResponse, error) // Pending → In Progress
-	CloseTicket(ctx context.Context, ticketID string) (*TicketResponse, error)       // In Progress → Closed
+	AcknowledgeTicket(ctx context.Context, ticketID string) (*TicketResponse, error)
+	CloseTicket(ctx context.Context, ticketID string) (*TicketResponse, error)
 	SetUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error)
 	StartChangeStream(ctx context.Context)
 	GetHub() *Hub
@@ -76,8 +103,8 @@ func (s *service) GetHub() *Hub {
 	return s.hub
 }
 
-// CreateTicket — called when user presses SOS button
-// Automatically sets Status = Pending and records current timestamp
+// CreateTicket — User กดปุ่ม SOS
+// ตั้งค่า Status = Pending และ Urgent = "" อัตโนมัติ
 func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*TicketResponse, error) {
 	ticketID, err := s.repo.GenerateTicketID(ctx)
 	if err != nil {
@@ -87,8 +114,8 @@ func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*T
 	ticket := &Ticket{
 		TicketID:  ticketID,
 		UserName:  req.UserName,
-		Status:    StatusPending, // always starts as Pending
-		Urgent:    UrgentNone,   // admin sets this later
+		Status:    StatusPending,
+		Urgent:    UrgentNone,
 		Location:  req.Location,
 		VoiceClip: req.VoiceClip,
 		Timestamp: time.Now(),
@@ -103,13 +130,11 @@ func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*T
 	return &resp, nil
 }
 
-// GetAllTickets — admin dashboard view, sorted newest first
 func (s *service) GetAllTickets(ctx context.Context) ([]TicketResponse, error) {
 	tickets, err := s.repo.FindAll(ctx)
 	if err != nil {
 		return nil, err
 	}
-
 	responses := make([]TicketResponse, len(tickets))
 	for i, t := range tickets {
 		responses[i] = toResponse(t)
@@ -117,7 +142,6 @@ func (s *service) GetAllTickets(ctx context.Context) ([]TicketResponse, error) {
 	return responses, nil
 }
 
-// GetTicket — get single ticket for user status polling
 func (s *service) GetTicket(ctx context.Context, ticketID string) (*TicketResponse, error) {
 	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
@@ -130,8 +154,8 @@ func (s *service) GetTicket(ctx context.Context, ticketID string) (*TicketRespon
 	return &resp, nil
 }
 
-// AcknowledgeTicket — admin accepts the case: Pending → In Progress
-// This triggers real-time update to the User's screen (turns green)
+// AcknowledgeTicket — Admin กดรับเรื่อง: Pending → In Progress
+// Change Stream จะ broadcast ไปยัง User เจ้าของ ticket ทันที
 func (s *service) AcknowledgeTicket(ctx context.Context, ticketID string) (*TicketResponse, error) {
 	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
@@ -147,11 +171,11 @@ func (s *service) AcknowledgeTicket(ctx context.Context, ticketID string) (*Tick
 
 	ticket.Status = StatusInProgress
 	resp := toResponse(*ticket)
-	log.Printf("[SOS] Ticket %s acknowledged → In Progress", ticketID)
+	log.Printf("[SOS] Ticket %s → In Progress", ticketID)
 	return &resp, nil
 }
 
-// CloseTicket — admin marks the case as resolved
+// CloseTicket — Admin ปิดงาน → ข้อมูลยังอยู่ใน MongoDB เป็น log ย้อนหลัง
 func (s *service) CloseTicket(ctx context.Context, ticketID string) (*TicketResponse, error) {
 	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
@@ -167,11 +191,11 @@ func (s *service) CloseTicket(ctx context.Context, ticketID string) (*TicketResp
 
 	ticket.Status = StatusClosed
 	resp := toResponse(*ticket)
-	log.Printf("[SOS] Ticket %s closed", ticketID)
+	log.Printf("[SOS] Ticket %s → Closed", ticketID)
 	return &resp, nil
 }
 
-// SetUrgent — admin-only: classify urgency level of the case
+// SetUrgent — Admin จัดลำดับความเร่งด่วน (admin-only field)
 func (s *service) SetUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error) {
 	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
@@ -187,31 +211,35 @@ func (s *service) SetUrgent(ctx context.Context, ticketID string, urgent UrgentL
 
 	ticket.Urgent = urgent
 	resp := toResponse(*ticket)
-	log.Printf("[SOS] Ticket %s urgency set to: %s", ticketID, urgent)
+	log.Printf("[SOS] Ticket %s urgency → %s", ticketID, urgent)
 	return &resp, nil
 }
 
-// StartChangeStream listens to MongoDB Change Stream and broadcasts updates
-// to all connected WebSocket clients in real time
+// StartChangeStream — ฟัง MongoDB Change Stream แล้ว broadcast ผ่าน SSE Hub
+//
+// Flow:
+//  insert  → BroadcastAll    (admin dashboard เห็น ticket ใหม่ทันที)
+//  update  → BroadcastToTicket (User เจ้าของ ticket เห็นสถานะเปลี่ยนทันที)
 func (s *service) StartChangeStream(ctx context.Context) {
 	go func() {
-		log.Println("[ChangeStream] Starting MongoDB Change Stream watcher...")
+		log.Println("[ChangeStream] Starting...")
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("[ChangeStream] Context cancelled, stopping.")
+				log.Println("[ChangeStream] Stopped.")
 				return
 			default:
 			}
 
 			stream, err := s.repo.WatchChanges(ctx)
 			if err != nil {
-				log.Printf("[ChangeStream] Watch error: %v — retrying in 3s", err)
+				log.Printf("[ChangeStream] Watch error: %v — retry in 3s", err)
 				time.Sleep(3 * time.Second)
 				continue
 			}
 
 			log.Println("[ChangeStream] Watching for ticket changes...")
+
 			for stream.Next(ctx) {
 				var event struct {
 					OperationType string  `bson:"operationType"`
@@ -227,19 +255,30 @@ func (s *service) StartChangeStream(ctx context.Context) {
 					continue
 				}
 
-				// Broadcast operation type + full ticket to all WebSocket clients
 				resp := toResponse(*event.FullDocument)
+
+				// สร้าง SSE payload: "data: {...}\n\n"
 				payload, _ := bson.MarshalExtJSON(bson.M{
 					"operation": event.OperationType,
 					"ticket":    resp,
 				}, false, false)
 
-				s.hub.Broadcast(payload)
-				log.Printf("[ChangeStream] Broadcast %s for ticket %s", event.OperationType, event.FullDocument.TicketID)
+				switch event.OperationType {
+				case "insert":
+					// Ticket ใหม่ → แจ้ง admin dashboard ทุก client
+					s.hub.BroadcastAll(payload)
+					log.Printf("[ChangeStream] insert → BroadcastAll ticket %s", event.FullDocument.TicketID)
+
+				case "update", "replace":
+					// Status/Urgent เปลี่ยน → แจ้งเฉพาะ User เจ้าของ ticket
+					s.hub.BroadcastToTicket(event.FullDocument.TicketID, payload)
+					log.Printf("[ChangeStream] update → BroadcastToTicket %s (status: %s)",
+						event.FullDocument.TicketID, event.FullDocument.Status)
+				}
 			}
 
 			if err := stream.Err(); err != nil && ctx.Err() == nil {
-				log.Printf("[ChangeStream] Stream error: %v — restarting in 3s", err)
+				log.Printf("[ChangeStream] Stream error: %v — restart in 3s", err)
 				time.Sleep(3 * time.Second)
 			}
 		}

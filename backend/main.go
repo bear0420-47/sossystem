@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"sossystem/database"
-	"sossystem/user"
+	"sos-system/database"
+	"sos-system/user"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -18,7 +18,6 @@ import (
 )
 
 func main() {
-	// Load .env (ignore error in production where env vars are set externally)
 	if err := godotenv.Load(); err != nil {
 		log.Println("[Config] No .env file found, using environment variables")
 	}
@@ -27,29 +26,30 @@ func main() {
 	database.ConnectMongo()
 	defer database.Disconnect()
 
-	// ── Application context (for graceful shutdown) ───────────────────────
+	// ── Context สำหรับ graceful shutdown ──────────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── Dependency injection (wire up layers) ─────────────────────────────
+	// ── Dependency injection ──────────────────────────────────────────────
 	repo := user.NewRepository()
 	svc := user.NewService(repo)
 	handler := user.NewHandler(svc)
 
-	// ── Real-time Change Stream (MongoDB → WebSocket broadcast) ───────────
+	// ── เริ่ม MongoDB Change Stream (real-time push ผ่าน SSE Hub) ─────────
 	svc.StartChangeStream(ctx)
 
-	// ── Fiber HTTP Server ─────────────────────────────────────────────────
+	// ── Fiber (ไม่ต้องใช้ Streamable เพราะ SSE ใช้ SetBodyStreamWriter) ──
 	app := fiber.New(fiber.Config{
-		AppName: "SOS Emergency Response System",
+		AppName:               "SOS Emergency Response System",
+		StreamRequestBody:     true,
+		DisableStartupMessage: false,
 	})
 
-	// Global middleware
 	app.Use(recover.New())
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept",
+		AllowHeaders: "Origin, Content-Type, Accept, Cache-Control",
 		AllowMethods: "GET, POST, PATCH, DELETE",
 	}))
 
@@ -58,7 +58,7 @@ func main() {
 		return c.JSON(fiber.Map{"status": "ok", "service": "SOS System"})
 	})
 
-	// Register SOS routes under /api/v1
+	// SOS routes
 	api := app.Group("/api/v1")
 	handler.RegisterRoutes(api)
 
@@ -72,14 +72,14 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("[Server] SOS System running on :%s", port)
+		log.Printf("[Server] SOS System (SSE mode) running on :%s", port)
 		if err := app.Listen(":" + port); err != nil {
 			log.Fatalf("[Server] Failed to start: %v", err)
 		}
 	}()
 
 	<-quit
-	log.Println("[Server] Shutting down gracefully...")
+	log.Println("[Server] Shutting down...")
 	cancel()
 	_ = app.Shutdown()
 }

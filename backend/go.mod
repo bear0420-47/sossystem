@@ -1,4 +1,4 @@
-module sossystem
+module sos-system
 
 go 1.26.1
 
