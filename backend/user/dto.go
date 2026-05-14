@@ -1,51 +1,31 @@
-package ticket
+package user
 
-// CreateTicketRequest — ส่งมาจาก User เมื่อกด SOS
+// CreateTicketRequest — payload sent by the User/Victim when pressing SOS
+// voice_clip is a pre-signed URL from the client after uploading the audio file
 type CreateTicketRequest struct {
-	UserName  string  `json:"user_name"  validate:"required"`
-	UserID    string  `json:"user_id"    validate:"required"`
-	Latitude  float64 `json:"latitude"   validate:"required"`
-	Longitude float64 `json:"longitude"  validate:"required"`
-	// VoiceClip URL จะถูก set หลังจาก upload ไฟล์เสียงแล้ว
-	VoiceClip string `json:"voice_clip"`
+	UserName  string `json:"user_name"  validate:"required"`
+	Location  string `json:"location"   validate:"required"` // "lat, lng"
+	VoiceClip string `json:"voice_clip" validate:"required"` // storage URL
 }
 
-// UpdateStatusRequest — ส่งมาจาก Admin เพื่อเปลี่ยนสถานะ
+// UpdateStatusRequest — payload sent by Admin to change ticket status
 type UpdateStatusRequest struct {
-	Status    TicketStatus `json:"status"     validate:"required,oneof=Pending 'In Progress' Closed"`
-	AdminNote string       `json:"admin_note"`
+	Status TicketStatus `json:"status" validate:"required,oneof=Pending 'In Progress' Closed"`
 }
 
-// UpdateUrgentRequest — ส่งมาจาก Admin เพื่อกำหนดระดับความเร่งด่วน (Admin เท่านั้น)
+// UpdateUrgentRequest — payload sent by Admin to set priority level
+// Only admin can call this endpoint
 type UpdateUrgentRequest struct {
-	Urgent UrgentLevel `json:"urgent" validate:"required,oneof=Low Medium High Critical"`
+	Urgent UrgentLevel `json:"urgent" validate:"required,oneof='' Low Medium High Critical"`
 }
 
-// TicketResponse — ส่งกลับไปให้ client
+// TicketResponse — outgoing JSON that exactly matches the required schema
 type TicketResponse struct {
 	TicketID  string       `json:"ticket_id"`
 	UserName  string       `json:"user_name"`
-	UserID    string       `json:"user_id"`
 	Status    TicketStatus `json:"status"`
 	Urgent    UrgentLevel  `json:"urgent"`
 	Location  string       `json:"location"`
-	Latitude  float64      `json:"latitude"`
-	Longitude float64      `json:"longitude"`
 	VoiceClip string       `json:"voice_clip"`
-	Timestamp string       `json:"timestamp"`
-	UpdatedAt string       `json:"updated_at"`
-	AdminNote string       `json:"admin_note,omitempty"`
-}
-
-// TicketListResponse — สำหรับ Admin Dashboard
-type TicketListResponse struct {
-	Total   int64             `json:"total"`
-	Tickets []TicketResponse  `json:"tickets"`
-}
-
-// UploadVoiceResponse — ส่งกลับหลัง upload เสียงสำเร็จ
-type UploadVoiceResponse struct {
-	TicketID  string `json:"ticket_id"`
-	VoiceClip string `json:"voice_clip"`
-	Message   string `json:"message"`
+	Timestamp string       `json:"timestamp"` // formatted: "2006-01-02 15:04:05"
 }

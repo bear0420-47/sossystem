@@ -1,129 +1,183 @@
-package sos
+package user
 
 import (
-	"net/http"
+	"encoding/json"
+	"log"
 
-	"github.com/gin-gonic/gin"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/websocket/v2"
 )
 
 type Handler struct {
-	service Service
+	svc Service
 }
 
-func NewHandler(service Service) *Handler {
-	return &Handler{
-		service: service,
-	}
+func NewHandler(svc Service) *Handler {
+	return &Handler{svc: svc}
 }
 
-func (h *Handler) CreateSOS(c *gin.Context) {
-	var req CreateSOSDTO
+// RegisterRoutes mounts all SOS API endpoints on the given fiber.Router
+// Routes are grouped under /api/v1/sos
+func (h *Handler) RegisterRoutes(router fiber.Router) {
+	sos := router.Group("/sos")
 
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
+	// ── User (Victim) routes ──────────────────────────────────────────────
+	// POST /api/v1/sos/tickets           → create new SOS ticket
+	// GET  /api/v1/sos/tickets/:id       → poll ticket status (user screen)
+	// GET  /api/v1/sos/ws                → WebSocket: real-time status push to user
+	sos.Post("/tickets", h.CreateTicket)
+	sos.Get("/tickets/:id", h.GetTicket)
+
+	// ── Admin (Responder) routes ──────────────────────────────────────────
+	// GET   /api/v1/sos/admin/tickets              → dashboard: all tickets
+	// PATCH /api/v1/sos/admin/tickets/:id/acknowledge → Pending → In Progress
+	// PATCH /api/v1/sos/admin/tickets/:id/close       → → Closed
+	// PATCH /api/v1/sos/admin/tickets/:id/urgent      → set urgency level
+	admin := sos.Group("/admin")
+	admin.Get("/tickets", h.GetAllTickets)
+	admin.Patch("/tickets/:id/acknowledge", h.AcknowledgeTicket)
+	admin.Patch("/tickets/:id/close", h.CloseTicket)
+	admin.Patch("/tickets/:id/urgent", h.SetUrgent)
+
+	// ── WebSocket upgrade ─────────────────────────────────────────────────
+	// GET /api/v1/sos/ws  → upgrade to WebSocket for real-time updates
+	sos.Get("/ws", websocket.New(h.WebSocketHandler))
+}
+
+// CreateTicket handles POST /sos/tickets
+// Triggered when user presses the SOS button; auto-sets Status = Pending
+func (h *Handler) CreateTicket(c *fiber.Ctx) error {
+	var req CreateTicketRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
 		})
-		return
 	}
 
-	result, err := h.service.CreateSOS(req)
+	if req.UserName == "" || req.Location == "" || req.VoiceClip == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "user_name, location, and voice_clip are required",
+		})
+	}
+
+	ticket, err := h.svc.CreateTicket(c.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": err.Error(),
 		})
-		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "SOS Created",
-		"data":    result,
-	})
+	return c.Status(fiber.StatusCreated).JSON(ticket)
 }
 
-func (h *Handler) GetAllSOS(c *gin.Context) {
-	result, err := h.service.GetAllSOS()
-
+// GetTicket handles GET /sos/tickets/:id
+// Used by the User's app to poll/verify their current ticket status
+func (h *Handler) GetTicket(c *fiber.Ctx) error {
+	ticketID := c.Params("id")
+	ticket, err := h.svc.GetTicket(c.Context(), ticketID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": err.Error(),
 		})
-		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": result,
-	})
+	return c.JSON(ticket)
 }
 
-func (h *Handler) GetSOSByTicketID(c *gin.Context) {
-	ticketID := c.Param("ticket_id")
-
-	result, err := h.service.GetSOSByTicketID(ticketID)
-
+// GetAllTickets handles GET /sos/admin/tickets
+// Admin dashboard: returns all tickets sorted newest first
+func (h *Handler) GetAllTickets(c *fiber.Ctx) error {
+	tickets, err := h.svc.GetAllTickets(c.Context())
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "ticket not found",
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
 		})
-		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": result,
-	})
+	return c.JSON(tickets)
 }
 
-func (h *Handler) UpdateStatus(c *gin.Context) {
-	ticketID := c.Param("ticket_id")
-
-	var body struct {
-		Status string `json:"status"`
-	}
-
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	err := h.service.UpdateStatus(ticketID, body.Status)
-
+// AcknowledgeTicket handles PATCH /sos/admin/tickets/:id/acknowledge
+// Changes status from Pending → In Progress; triggers User screen to turn green
+func (h *Handler) AcknowledgeTicket(c *fiber.Ctx) error {
+	ticketID := c.Params("id")
+	ticket, err := h.svc.AcknowledgeTicket(c.Context(), ticketID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
-		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "status updated",
-	})
+	return c.JSON(ticket)
 }
 
-func (h *Handler) UpdateUrgent(c *gin.Context) {
-	ticketID := c.Param("ticket_id")
-
-	var body struct {
-		Urgent string `json:"urgent"`
-	}
-
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	err := h.service.UpdateUrgent(ticketID, body.Urgent)
-
+// CloseTicket handles PATCH /sos/admin/tickets/:id/close
+// Marks case as resolved; history is preserved in MongoDB for audit trail
+func (h *Handler) CloseTicket(c *fiber.Ctx) error {
+	ticketID := c.Params("id")
+	ticket, err := h.svc.CloseTicket(c.Context(), ticketID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
-		return
+	}
+	return c.JSON(ticket)
+}
+
+// SetUrgent handles PATCH /sos/admin/tickets/:id/urgent
+// Admin-only: sets urgency level (Low / Medium / High / Critical)
+func (h *Handler) SetUrgent(c *fiber.Ctx) error {
+	ticketID := c.Params("id")
+
+	var req UpdateUrgentRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "urgent updated",
-	})
+	ticket, err := h.svc.SetUrgent(c.Context(), ticketID, req.Urgent)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+	return c.JSON(ticket)
+}
+
+// WebSocketHandler manages a single WebSocket connection lifecycle
+// Clients connect here to receive real-time ticket events pushed by Change Stream
+func (h *Handler) WebSocketHandler(c *websocket.Conn) {
+	client := &wsClient{send: make(chan []byte, 64)}
+	hub := h.svc.GetHub()
+	hub.Register(client)
+
+	log.Printf("[WS] Client connected: %s", c.RemoteAddr())
+
+	// Goroutine: write outgoing messages to the WebSocket
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for msg := range client.send {
+			if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+				log.Printf("[WS] Write error: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Block here reading incoming messages (ping/pong or client close)
+	for {
+		_, msg, err := c.ReadMessage()
+		if err != nil {
+			log.Printf("[WS] Client disconnected: %s", c.RemoteAddr())
+			break
+		}
+		// Echo back any message as JSON acknowledgement (optional ping support)
+		_ = msg
+	}
+
+	hub.Unregister(client)
+	<-done
+
+	// Send final close event to the WebSocket client payload
+	closePayload, _ := json.Marshal(fiber.Map{"operation": "disconnect"})
+	_ = c.WriteMessage(websocket.TextMessage, closePayload)
 }

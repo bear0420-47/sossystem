@@ -1,180 +1,114 @@
-package ticket
+package user
 
 import (
 	"context"
 	"fmt"
 	"time"
 
+	"sossystem/database"
+
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+const collectionName = "tickets"
+
 type Repository interface {
-	Create(ctx context.Context, ticket *Ticket) (*Ticket, error)
+	Create(ctx context.Context, ticket *Ticket) error
+	FindAll(ctx context.Context) ([]Ticket, error)
 	FindByTicketID(ctx context.Context, ticketID string) (*Ticket, error)
-	FindAll(ctx context.Context, filter bson.M) ([]*Ticket, int64, error)
-	UpdateStatus(ctx context.Context, ticketID string, status TicketStatus, adminNote string) (*Ticket, error)
-	UpdateUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*Ticket, error)
-	UpdateVoiceClip(ctx context.Context, ticketID string, voiceURL string) (*Ticket, error)
+	UpdateStatus(ctx context.Context, ticketID string, status TicketStatus) error
+	UpdateUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) error
 	WatchChanges(ctx context.Context) (*mongo.ChangeStream, error)
+	GenerateTicketID(ctx context.Context) (string, error)
 }
 
 type repository struct {
 	col *mongo.Collection
 }
 
-func NewRepository(db *mongo.Database) Repository {
-	col := db.Collection("tickets")
-
-	// Index: ค้นหาด้วย ticket_id
-	col.Indexes().CreateOne(ctx(), mongo.IndexModel{
-		Keys:    bson.D{{Key: "ticket_id", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	// Index: เรียงตาม timestamp (Dashboard)
-	col.Indexes().CreateOne(ctx(), mongo.IndexModel{
-		Keys: bson.D{{Key: "timestamp", Value: -1}},
-	})
-	// Index: กรองตาม status
-	col.Indexes().CreateOne(ctx(), mongo.IndexModel{
-		Keys: bson.D{{Key: "status", Value: 1}},
-	})
-
-	return &repository{col: col}
-}
-
-func ctx() context.Context {
-	c, _ := context.WithTimeout(context.Background(), 5*time.Second)
-	return c
-}
-
-// Create สร้าง ticket ใหม่
-func (r *repository) Create(ctx context.Context, t *Ticket) (*Ticket, error) {
-	t.ID = primitive.NewObjectID()
-	t.Timestamp = time.Now()
-	t.UpdatedAt = time.Now()
-	t.Status = StatusPending // เริ่มต้นเป็น Pending เสมอ
-	t.Urgent = ""            // ให้ admin เป็นคนกำหนดเอง
-
-	_, err := r.col.InsertOne(ctx, t)
-	if err != nil {
-		return nil, fmt.Errorf("create ticket: %w", err)
+func NewRepository() Repository {
+	return &repository{
+		col: database.GetCollection(collectionName),
 	}
-	return t, nil
 }
 
-// FindByTicketID ค้นหาด้วย ticket_id string (เช่น "SOS-9901")
-func (r *repository) FindByTicketID(ctx context.Context, ticketID string) (*Ticket, error) {
-	var t Ticket
-	err := r.col.FindOne(ctx, bson.M{"ticket_id": ticketID}).Decode(&t)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, ErrTicketNotFound
-		}
-		return nil, fmt.Errorf("find ticket: %w", err)
-	}
-	return &t, nil
+// Create inserts a new SOS ticket into MongoDB
+func (r *repository) Create(ctx context.Context, ticket *Ticket) error {
+	_, err := r.col.InsertOne(ctx, ticket)
+	return err
 }
 
-// FindAll ดึงรายการ ticket (รองรับ filter เช่น status, user_id)
-func (r *repository) FindAll(ctx context.Context, filter bson.M) ([]*Ticket, int64, error) {
+// FindAll returns all tickets sorted by timestamp descending (newest first)
+func (r *repository) FindAll(ctx context.Context) ([]Ticket, error) {
 	opts := options.Find().SetSort(bson.D{{Key: "timestamp", Value: -1}})
-
-	total, err := r.col.CountDocuments(ctx, filter)
+	cursor, err := r.col.Find(ctx, bson.M{}, opts)
 	if err != nil {
-		return nil, 0, fmt.Errorf("count tickets: %w", err)
-	}
-
-	cursor, err := r.col.Find(ctx, filter, opts)
-	if err != nil {
-		return nil, 0, fmt.Errorf("find tickets: %w", err)
+		return nil, err
 	}
 	defer cursor.Close(ctx)
 
-	var tickets []*Ticket
+	var tickets []Ticket
 	if err := cursor.All(ctx, &tickets); err != nil {
-		return nil, 0, fmt.Errorf("decode tickets: %w", err)
+		return nil, err
 	}
-	return tickets, total, nil
+	return tickets, nil
 }
 
-// UpdateStatus เปลี่ยนสถานะ (Admin เท่านั้น) → trigger real-time ผ่าน Change Stream
-func (r *repository) UpdateStatus(ctx context.Context, ticketID string, status TicketStatus, adminNote string) (*Ticket, error) {
-	now := time.Now()
-	update := bson.M{
-		"$set": bson.M{
-			"status":     status,
-			"updated_at": now,
-			"admin_note": adminNote,
-		},
-	}
-
-	// ถ้าปิดเคส บันทึกเวลาปิดด้วย
-	if status == StatusClosed {
-		update["$set"].(bson.M)["closed_at"] = now
-	}
-
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	var t Ticket
-	err := r.col.FindOneAndUpdate(ctx, bson.M{"ticket_id": ticketID}, update, opts).Decode(&t)
+// FindByTicketID retrieves a single ticket by its human-readable ID (e.g. "SOS-9901")
+func (r *repository) FindByTicketID(ctx context.Context, ticketID string) (*Ticket, error) {
+	var ticket Ticket
+	err := r.col.FindOne(ctx, bson.M{"ticket_id": ticketID}).Decode(&ticket)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, ErrTicketNotFound
-		}
-		return nil, fmt.Errorf("update status: %w", err)
+		return nil, err
 	}
-	return &t, nil
+	return &ticket, nil
 }
 
-// UpdateUrgent — Admin กำหนดระดับความเร่งด่วน
-func (r *repository) UpdateUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*Ticket, error) {
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	var t Ticket
-	err := r.col.FindOneAndUpdate(ctx,
-		bson.M{"ticket_id": ticketID},
-		bson.M{"$set": bson.M{"urgent": urgent, "updated_at": time.Now()}},
-		opts,
-	).Decode(&t)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, ErrTicketNotFound
-		}
-		return nil, fmt.Errorf("update urgent: %w", err)
-	}
-	return &t, nil
+// UpdateStatus changes the lifecycle state; only Status field is modified
+func (r *repository) UpdateStatus(ctx context.Context, ticketID string, status TicketStatus) error {
+	filter := bson.M{"ticket_id": ticketID}
+	update := bson.M{"$set": bson.M{"status": status}}
+	_, err := r.col.UpdateOne(ctx, filter, update)
+	return err
 }
 
-// UpdateVoiceClip อัปเดต URL เสียงหลังจาก upload ขึ้น storage เสร็จ
-func (r *repository) UpdateVoiceClip(ctx context.Context, ticketID string, voiceURL string) (*Ticket, error) {
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	var t Ticket
-	err := r.col.FindOneAndUpdate(ctx,
-		bson.M{"ticket_id": ticketID},
-		bson.M{"$set": bson.M{"voice_clip": voiceURL, "updated_at": time.Now()}},
-		opts,
-	).Decode(&t)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, ErrTicketNotFound
-		}
-		return nil, fmt.Errorf("update voice_clip: %w", err)
-	}
-	return &t, nil
+// UpdateUrgent sets admin-controlled priority level; only Urgent field is modified
+func (r *repository) UpdateUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) error {
+	filter := bson.M{"ticket_id": ticketID}
+	update := bson.M{"$set": bson.M{"urgent": urgent}}
+	_, err := r.col.UpdateOne(ctx, filter, update)
+	return err
 }
 
-// WatchChanges เปิด MongoDB Change Stream เพื่อ push real-time ไปยัง SSE / WebSocket
+// WatchChanges opens a MongoDB Change Stream on the tickets collection
+// This enables real-time push to WebSocket clients without polling
 func (r *repository) WatchChanges(ctx context.Context) (*mongo.ChangeStream, error) {
-	pipeline := mongo.Pipeline{
-		bson.D{{Key: "$match", Value: bson.D{
-			{Key: "operationType", Value: bson.D{{Key: "$in", Value: bson.A{"insert", "update"}}}},
-		}}},
-	}
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-	stream, err := r.col.Watch(ctx, pipeline, opts)
+	return r.col.Watch(ctx, mongo.Pipeline{}, opts)
+}
+
+// GenerateTicketID creates a sequential ID like "SOS-0001"
+// Counts existing documents to produce the next number
+func (r *repository) GenerateTicketID(ctx context.Context) (string, error) {
+	count, err := r.col.CountDocuments(ctx, bson.M{})
 	if err != nil {
-		return nil, fmt.Errorf("watch changes: %w", err)
+		return "", err
 	}
-	return stream, nil
+	nextNum := count + 1
+	return fmt.Sprintf("SOS-%04d", nextNum), nil
+}
+
+// toResponse converts internal Ticket model to the outgoing DTO
+func toResponse(t Ticket) TicketResponse {
+	return TicketResponse{
+		TicketID:  t.TicketID,
+		UserName:  t.UserName,
+		Status:    t.Status,
+		Urgent:    t.Urgent,
+		Location:  t.Location,
+		VoiceClip: t.VoiceClip,
+		Timestamp: t.Timestamp.Format(time.DateTime), // "2006-01-02 15:04:05"
+	}
 }

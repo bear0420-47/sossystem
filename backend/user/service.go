@@ -1,178 +1,247 @@
-package ticket
+package user
 
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// --- Sentinel errors ---
-var (
-	ErrTicketNotFound    = errors.New("ticket not found")
-	ErrUnauthorized      = errors.New("unauthorized: admin only")
-	ErrInvalidStatus     = errors.New("invalid status transition")
-)
+// wsClient represents a connected WebSocket client
+type wsClient struct {
+	send chan []byte
+}
 
+// Hub manages all active WebSocket connections for real-time broadcast
+type Hub struct {
+	mu      sync.RWMutex
+	clients map[*wsClient]bool
+}
+
+var globalHub = &Hub{
+	clients: make(map[*wsClient]bool),
+}
+
+func (h *Hub) Register(c *wsClient) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.clients[c] = true
+}
+
+func (h *Hub) Unregister(c *wsClient) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.clients, c)
+	close(c.send)
+}
+
+func (h *Hub) Broadcast(msg []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		select {
+		case c.send <- msg:
+		default:
+			// Client too slow — skip this cycle
+		}
+	}
+}
+
+// Service defines all business logic for the SOS system
 type Service interface {
-	// User flow
 	CreateTicket(ctx context.Context, req CreateTicketRequest) (*TicketResponse, error)
-	AttachVoiceClip(ctx context.Context, ticketID string, voiceURL string) (*UploadVoiceResponse, error)
-	GetTicketStatus(ctx context.Context, ticketID string) (*TicketResponse, error)
-
-	// Admin flow
-	ListTickets(ctx context.Context, statusFilter string) (*TicketListResponse, error)
-	AcknowledgeTicket(ctx context.Context, ticketID string, adminNote string) (*TicketResponse, error)
-	CloseTicket(ctx context.Context, ticketID string, adminNote string) (*TicketResponse, error)
-	SetUrgentLevel(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error)
+	GetAllTickets(ctx context.Context) ([]TicketResponse, error)
+	GetTicket(ctx context.Context, ticketID string) (*TicketResponse, error)
+	AcknowledgeTicket(ctx context.Context, ticketID string) (*TicketResponse, error) // Pending → In Progress
+	CloseTicket(ctx context.Context, ticketID string) (*TicketResponse, error)       // In Progress → Closed
+	SetUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error)
+	StartChangeStream(ctx context.Context)
+	GetHub() *Hub
 }
 
 type service struct {
 	repo Repository
+	hub  *Hub
 }
 
 func NewService(repo Repository) Service {
-	return &service{repo: repo}
+	return &service{repo: repo, hub: globalHub}
 }
 
-// ─── User Flow ────────────────────────────────────────────────────────────────
+func (s *service) GetHub() *Hub {
+	return s.hub
+}
 
-// CreateTicket รับ GPS + ชื่อผู้ใช้ → สร้าง ticket ใหม่สถานะ Pending
+// CreateTicket — called when user presses SOS button
+// Automatically sets Status = Pending and records current timestamp
 func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*TicketResponse, error) {
-	ticketID := generateTicketID()
+	ticketID, err := s.repo.GenerateTicketID(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	t := &Ticket{
+	ticket := &Ticket{
 		TicketID:  ticketID,
 		UserName:  req.UserName,
-		UserID:    req.UserID,
-		Location:  fmt.Sprintf("%.6f, %.6f", req.Latitude, req.Longitude),
-		Latitude:  req.Latitude,
-		Longitude: req.Longitude,
-		VoiceClip: req.VoiceClip, // อาจว่างก่อน แล้ว attach ทีหลัง
-		Status:    StatusPending,
-		Urgent:    "",
+		Status:    StatusPending, // always starts as Pending
+		Urgent:    UrgentNone,   // admin sets this later
+		Location:  req.Location,
+		VoiceClip: req.VoiceClip,
+		Timestamp: time.Now(),
 	}
 
-	created, err := s.repo.Create(ctx, t)
-	if err != nil {
-		return nil, fmt.Errorf("service.CreateTicket: %w", err)
+	if err := s.repo.Create(ctx, ticket); err != nil {
+		return nil, err
 	}
-	return toResponse(created), nil
+
+	resp := toResponse(*ticket)
+	log.Printf("[SOS] New ticket created: %s by %s", ticket.TicketID, ticket.UserName)
+	return &resp, nil
 }
 
-// AttachVoiceClip อัปเดต URL เสียงหลังจาก client upload ขึ้น object storage
-func (s *service) AttachVoiceClip(ctx context.Context, ticketID string, voiceURL string) (*UploadVoiceResponse, error) {
-	_, err := s.repo.UpdateVoiceClip(ctx, ticketID, voiceURL)
-	if err != nil {
-		return nil, fmt.Errorf("service.AttachVoiceClip: %w", err)
-	}
-	return &UploadVoiceResponse{
-		TicketID:  ticketID,
-		VoiceClip: voiceURL,
-		Message:   "voice clip attached successfully",
-	}, nil
-}
-
-// GetTicketStatus ให้ User ดึงสถานะล่าสุดของตัวเอง (polling fallback)
-func (s *service) GetTicketStatus(ctx context.Context, ticketID string) (*TicketResponse, error) {
-	t, err := s.repo.FindByTicketID(ctx, ticketID)
+// GetAllTickets — admin dashboard view, sorted newest first
+func (s *service) GetAllTickets(ctx context.Context) ([]TicketResponse, error) {
+	tickets, err := s.repo.FindAll(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return toResponse(t), nil
+
+	responses := make([]TicketResponse, len(tickets))
+	for i, t := range tickets {
+		responses[i] = toResponse(t)
+	}
+	return responses, nil
 }
 
-// ─── Admin Flow ───────────────────────────────────────────────────────────────
-
-// ListTickets ดึงรายการ ticket ทั้งหมด (กรองด้วย status ได้)
-func (s *service) ListTickets(ctx context.Context, statusFilter string) (*TicketListResponse, error) {
-	filter := bson.M{}
-	if statusFilter != "" {
-		filter["status"] = statusFilter
-	}
-
-	tickets, total, err := s.repo.FindAll(ctx, filter)
+// GetTicket — get single ticket for user status polling
+func (s *service) GetTicket(ctx context.Context, ticketID string) (*TicketResponse, error) {
+	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
-		return nil, fmt.Errorf("service.ListTickets: %w", err)
-	}
-
-	resp := make([]TicketResponse, 0, len(tickets))
-	for _, t := range tickets {
-		resp = append(resp, *toResponse(t))
-	}
-	return &TicketListResponse{Total: total, Tickets: resp}, nil
-}
-
-// AcknowledgeTicket Admin กดรับเรื่อง → เปลี่ยนเป็น In Progress (User screen เปลี่ยนเป็นเขียว)
-func (s *service) AcknowledgeTicket(ctx context.Context, ticketID string, adminNote string) (*TicketResponse, error) {
-	t, err := s.repo.FindByTicketID(ctx, ticketID)
-	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("ticket not found")
+		}
 		return nil, err
 	}
-	if t.Status != StatusPending {
-		return nil, fmt.Errorf("%w: can only acknowledge Pending tickets", ErrInvalidStatus)
-	}
-
-	updated, err := s.repo.UpdateStatus(ctx, ticketID, StatusInProgress, adminNote)
-	if err != nil {
-		return nil, fmt.Errorf("service.AcknowledgeTicket: %w", err)
-	}
-	return toResponse(updated), nil
+	resp := toResponse(*ticket)
+	return &resp, nil
 }
 
-// CloseTicket Admin ปิดเคสหลังให้ความช่วยเหลือเสร็จ
-func (s *service) CloseTicket(ctx context.Context, ticketID string, adminNote string) (*TicketResponse, error) {
-	t, err := s.repo.FindByTicketID(ctx, ticketID)
+// AcknowledgeTicket — admin accepts the case: Pending → In Progress
+// This triggers real-time update to the User's screen (turns green)
+func (s *service) AcknowledgeTicket(ctx context.Context, ticketID string) (*TicketResponse, error) {
+	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
+		return nil, errors.New("ticket not found")
+	}
+	if ticket.Status != StatusPending {
+		return nil, errors.New("only Pending tickets can be acknowledged")
+	}
+
+	if err := s.repo.UpdateStatus(ctx, ticketID, StatusInProgress); err != nil {
 		return nil, err
 	}
-	if t.Status == StatusClosed {
-		return nil, fmt.Errorf("%w: ticket is already closed", ErrInvalidStatus)
-	}
 
-	updated, err := s.repo.UpdateStatus(ctx, ticketID, StatusClosed, adminNote)
+	ticket.Status = StatusInProgress
+	resp := toResponse(*ticket)
+	log.Printf("[SOS] Ticket %s acknowledged → In Progress", ticketID)
+	return &resp, nil
+}
+
+// CloseTicket — admin marks the case as resolved
+func (s *service) CloseTicket(ctx context.Context, ticketID string) (*TicketResponse, error) {
+	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
-		return nil, fmt.Errorf("service.CloseTicket: %w", err)
+		return nil, errors.New("ticket not found")
 	}
-	return toResponse(updated), nil
+	if ticket.Status == StatusClosed {
+		return nil, errors.New("ticket is already closed")
+	}
+
+	if err := s.repo.UpdateStatus(ctx, ticketID, StatusClosed); err != nil {
+		return nil, err
+	}
+
+	ticket.Status = StatusClosed
+	resp := toResponse(*ticket)
+	log.Printf("[SOS] Ticket %s closed", ticketID)
+	return &resp, nil
 }
 
-// SetUrgentLevel Admin กำหนดระดับความเร่งด่วน (Admin-only field)
-func (s *service) SetUrgentLevel(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error) {
-	updated, err := s.repo.UpdateUrgent(ctx, ticketID, urgent)
+// SetUrgent — admin-only: classify urgency level of the case
+func (s *service) SetUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error) {
+	ticket, err := s.repo.FindByTicketID(ctx, ticketID)
 	if err != nil {
-		return nil, fmt.Errorf("service.SetUrgentLevel: %w", err)
+		return nil, errors.New("ticket not found")
 	}
-	return toResponse(updated), nil
+	if ticket.Status == StatusClosed {
+		return nil, errors.New("cannot change urgency of a closed ticket")
+	}
+
+	if err := s.repo.UpdateUrgent(ctx, ticketID, urgent); err != nil {
+		return nil, err
+	}
+
+	ticket.Urgent = urgent
+	resp := toResponse(*ticket)
+	log.Printf("[SOS] Ticket %s urgency set to: %s", ticketID, urgent)
+	return &resp, nil
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// StartChangeStream listens to MongoDB Change Stream and broadcasts updates
+// to all connected WebSocket clients in real time
+func (s *service) StartChangeStream(ctx context.Context) {
+	go func() {
+		log.Println("[ChangeStream] Starting MongoDB Change Stream watcher...")
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("[ChangeStream] Context cancelled, stopping.")
+				return
+			default:
+			}
 
-func generateTicketID() string {
-	return fmt.Sprintf("SOS-%d", time.Now().UnixNano()%100000)
-}
+			stream, err := s.repo.WatchChanges(ctx)
+			if err != nil {
+				log.Printf("[ChangeStream] Watch error: %v — retrying in 3s", err)
+				time.Sleep(3 * time.Second)
+				continue
+			}
 
-func toResponse(t *Ticket) *TicketResponse {
-	closedFmt := ""
-	if t.ClosedAt != nil {
-		closedFmt = t.ClosedAt.Format("2006-01-02 15:04:05")
-	}
-	_ = closedFmt
+			log.Println("[ChangeStream] Watching for ticket changes...")
+			for stream.Next(ctx) {
+				var event struct {
+					OperationType string  `bson:"operationType"`
+					FullDocument  *Ticket `bson:"fullDocument"`
+				}
 
-	return &TicketResponse{
-		TicketID:  t.TicketID,
-		UserName:  t.UserName,
-		UserID:    t.UserID,
-		Status:    t.Status,
-		Urgent:    t.Urgent,
-		Location:  t.Location,
-		Latitude:  t.Latitude,
-		Longitude: t.Longitude,
-		VoiceClip: t.VoiceClip,
-		Timestamp: t.Timestamp.Format("2006-01-02 15:04:05"),
-		UpdatedAt: t.UpdatedAt.Format("2006-01-02 15:04:05"),
-		AdminNote: t.AdminNote,
-	}
+				if err := stream.Decode(&event); err != nil {
+					log.Printf("[ChangeStream] Decode error: %v", err)
+					continue
+				}
+
+				if event.FullDocument == nil {
+					continue
+				}
+
+				// Broadcast operation type + full ticket to all WebSocket clients
+				resp := toResponse(*event.FullDocument)
+				payload, _ := bson.MarshalExtJSON(bson.M{
+					"operation": event.OperationType,
+					"ticket":    resp,
+				}, false, false)
+
+				s.hub.Broadcast(payload)
+				log.Printf("[ChangeStream] Broadcast %s for ticket %s", event.OperationType, event.FullDocument.TicketID)
+			}
+
+			if err := stream.Err(); err != nil && ctx.Err() == nil {
+				log.Printf("[ChangeStream] Stream error: %v — restarting in 3s", err)
+				time.Sleep(3 * time.Second)
+			}
+		}
+	}()
 }
