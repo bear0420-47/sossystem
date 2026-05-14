@@ -104,7 +104,6 @@ func (r *repository) GenerateTicketID(ctx context.Context) (string, error) {
 func toResponse(t Ticket) TicketResponse {
 	return TicketResponse{
 		TicketID:  t.TicketID,
-		UserName:  t.UserName,
 		Status:    t.Status,
 		Urgent:    t.Urgent,
 		Location:  t.Location,

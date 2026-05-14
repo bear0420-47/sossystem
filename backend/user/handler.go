@@ -61,9 +61,9 @@ func (h *Handler) CreateTicket(c *fiber.Ctx) error {
 		})
 	}
 
-	if req.UserName == "" || req.Location == "" || req.VoiceClip == "" {
+	if  req.Location == "" || req.VoiceClip == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "user_name, location, and voice_clip are required",
+			"error": "location, and voice_clip are required",
 		})
 	}
 

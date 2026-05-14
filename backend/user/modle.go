@@ -31,7 +31,6 @@ const (
 type Ticket struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty"    json:"-"`
 	TicketID  string             `bson:"ticket_id"        json:"ticket_id"`   // e.g. "SOS-9901"
-	UserName  string             `bson:"user_name"        json:"user_name"`
 	Status    TicketStatus       `bson:"status"           json:"status"`      // Pending | In Progress | Closed
 	Urgent    UrgentLevel        `bson:"urgent"           json:"urgent"`      // admin-only field, default ""
 	Location  string             `bson:"location"         json:"location"`    // "lat, lng"

@@ -3,7 +3,6 @@ package user
 // CreateTicketRequest — payload sent by the User/Victim when pressing SOS
 // voice_clip is a pre-signed URL from the client after uploading the audio file
 type CreateTicketRequest struct {
-	UserName  string `json:"user_name"  validate:"required"`
 	Location  string `json:"location"   validate:"required"` // "lat, lng"
 	VoiceClip string `json:"voice_clip" validate:"required"` // storage URL
 }
@@ -22,7 +21,6 @@ type UpdateUrgentRequest struct {
 // TicketResponse — outgoing JSON that exactly matches the required schema
 type TicketResponse struct {
 	TicketID  string       `json:"ticket_id"`
-	UserName  string       `json:"user_name"`
 	Status    TicketStatus `json:"status"`
 	Urgent    UrgentLevel  `json:"urgent"`
 	Location  string       `json:"location"`

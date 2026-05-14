@@ -2,8 +2,10 @@ package user
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +17,7 @@ import (
 // sseClient คือ connection ของ User 1 คนที่เปิด SSE ค้างไว้
 // แต่ละ client subscribe เฉพาะ ticketID ของตัวเองเท่านั้น
 type sseClient struct {
-	ticketID string     // กรองเฉพาะ ticket ที่ตัวเองสนใจ
+	ticketID string      // กรองเฉพาะ ticket ที่ตัวเองสนใจ
 	send     chan []byte // channel สำหรับส่ง event ไปยัง client
 }
 
@@ -112,8 +114,9 @@ func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*T
 	}
 
 	ticket := &Ticket{
-		TicketID:  ticketID,
-		UserName:  req.UserName,
+		TicketID: ticketID,
+		// ลบบรรทัดนี้ออก:
+		// UserName:  req.UserName,
 		Status:    StatusPending,
 		Urgent:    UrgentNone,
 		Location:  req.Location,
@@ -126,7 +129,7 @@ func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*T
 	}
 
 	resp := toResponse(*ticket)
-	log.Printf("[SOS] New ticket created: %s by %s", ticket.TicketID, ticket.UserName)
+	log.Printf("[SOS] New ticket created: %s", ticket.TicketID)
 	return &resp, nil
 }
 
@@ -218,8 +221,9 @@ func (s *service) SetUrgent(ctx context.Context, ticketID string, urgent UrgentL
 // StartChangeStream — ฟัง MongoDB Change Stream แล้ว broadcast ผ่าน SSE Hub
 //
 // Flow:
-//  insert  → BroadcastAll    (admin dashboard เห็น ticket ใหม่ทันที)
-//  update  → BroadcastToTicket (User เจ้าของ ticket เห็นสถานะเปลี่ยนทันที)
+//
+//	insert  → BroadcastAll    (admin dashboard เห็น ticket ใหม่ทันที)
+//	update  → BroadcastToTicket (User เจ้าของ ticket เห็นสถานะเปลี่ยนทันที)
 func (s *service) StartChangeStream(ctx context.Context) {
 	go func() {
 		log.Println("[ChangeStream] Starting...")
@@ -233,6 +237,11 @@ func (s *service) StartChangeStream(ctx context.Context) {
 
 			stream, err := s.repo.WatchChanges(ctx)
 			if err != nil {
+				if isReplicaSetError(err) {
+					log.Println("[ChangeStream] Replica set not available — switching to polling mode (2s interval)")
+					s.startPollingFallback(ctx)
+					return
+				}
 				log.Printf("[ChangeStream] Watch error: %v — retry in 3s", err)
 				time.Sleep(3 * time.Second)
 				continue
@@ -280,6 +289,81 @@ func (s *service) StartChangeStream(ctx context.Context) {
 			if err := stream.Err(); err != nil && ctx.Err() == nil {
 				log.Printf("[ChangeStream] Stream error: %v — restart in 3s", err)
 				time.Sleep(3 * time.Second)
+			}
+		}
+	}()
+}
+
+// isReplicaSetError ตรวจว่า error มาจากการที่ MongoDB ไม่ใช่ Replica Set
+func isReplicaSetError(err error) bool {
+	return strings.Contains(err.Error(), "only supported on replica sets") ||
+		strings.Contains(err.Error(), "Location40573")
+}
+
+// startPollingFallback ใช้แทน Change Stream ตอน dev (MongoDB standalone)
+// Poll ทุก 2 วินาที เปรียบเทียบ snapshot ก่อนหน้า → broadcast เฉพาะที่เปลี่ยน
+func (s *service) startPollingFallback(ctx context.Context) {
+	go func() {
+		log.Println("[Polling] Fallback mode active — polling every 2s")
+
+		// snapshot เก็บ status+urgent ล่าสุดของแต่ละ ticket
+		type snapshot struct {
+			status TicketStatus
+			urgent UrgentLevel
+		}
+		prev := make(map[string]snapshot)
+		prevCount := 0
+
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("[Polling] Stopped.")
+				return
+			case <-ticker.C:
+			}
+
+			tickets, err := s.repo.FindAll(ctx)
+			if err != nil {
+				log.Printf("[Polling] FindAll error: %v", err)
+				continue
+			}
+
+			// ตรวจ ticket ใหม่
+			if len(tickets) > prevCount {
+				for i := prevCount; i < len(tickets); i++ {
+					t := tickets[i]
+					resp := toResponse(t)
+					payload, _ := json.Marshal(map[string]any{
+						"operation": "insert",
+						"ticket":    resp,
+					})
+					s.hub.BroadcastAll(payload)
+					log.Printf("[Polling] insert → BroadcastAll ticket %s", t.TicketID)
+				}
+				prevCount = len(tickets)
+			}
+
+			// ตรวจ status / urgent ที่เปลี่ยนแปลง
+			for _, t := range tickets {
+				snap, exists := prev[t.TicketID]
+				if !exists {
+					prev[t.TicketID] = snapshot{status: t.Status, urgent: t.Urgent}
+					continue
+				}
+
+				if snap.status != t.Status || snap.urgent != t.Urgent {
+					resp := toResponse(t)
+					payload, _ := json.Marshal(map[string]any{
+						"operation": "update",
+						"ticket":    resp,
+					})
+					s.hub.BroadcastToTicket(t.TicketID, payload)
+					log.Printf("[Polling] update → BroadcastToTicket %s (status: %s)", t.TicketID, t.Status)
+					prev[t.TicketID] = snapshot{status: t.Status, urgent: t.Urgent}
+				}
 			}
 		}
 	}()
