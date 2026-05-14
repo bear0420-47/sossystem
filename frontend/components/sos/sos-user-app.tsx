@@ -279,6 +279,22 @@ function parseLocation(location: string | null): { lat: number; lng: number } | 
   return { lat, lng }
 }
 
+function handleLocationError(error: GeolocationPositionError) {
+  switch (error.code) {
+    case error.PERMISSION_DENIED:
+      console.error("Permission denied")
+      break
+    case error.POSITION_UNAVAILABLE:
+      console.error("Position unavailable")
+      break
+    case error.TIMEOUT:
+      console.error("Timeout")
+      break
+    default:
+      console.error("Error getting location:", error)
+  }
+}
+
 // Help Coming State Screen - แสดง Map + Audio
 function HelpComingScreen() {
   const { location } = useSOSStore()
@@ -363,9 +379,7 @@ export default function SOSUserApp() {
         (position) => {
           setLocation(`${position.coords.latitude}, ${position.coords.longitude}`)
         },
-        (error) => {
-          console.error("Error getting location:", error)
-        }
+        handleLocationError
       )
     }
   }, [setLocation])

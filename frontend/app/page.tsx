@@ -66,27 +66,8 @@ export default function HomePage() {
         </Card>
       </div>
       
-      {/* Demo pages */}
-      <div className="mt-12 text-center">
-        <p className="text-sm text-muted-foreground mb-4">ตัวอย่างโค้ด TanStack Query + Zustand</p>
-        <div className="flex gap-4 justify-center">
-          <Link href="/majors">
-            <Button variant="ghost" size="sm">
-              ตัวอย่าง TanStack + Zustand
-            </Button>
-          </Link>
-          <Link href="/useeffect-demo">
-            <Button variant="ghost" size="sm">
-              ตัวอย่าง useEffect
-            </Button>
-          </Link>
-        </div>
-      </div>
       
-      {/* Footer */}
-      <footer className="mt-16 text-center text-sm text-muted-foreground">
-        <p>Built with Next.js + shadcn/ui + TanStack Query + Zustand</p>
-      </footer>
+      
     </main>
   )
 }
