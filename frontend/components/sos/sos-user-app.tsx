@@ -80,23 +80,70 @@ function SOSButton({ onPress }: { onPress: () => void }) {
   )
 }
 
-// Recording State Screen - 20 seconds
+// Recording State Screen - 20 seconds with actual audio recording
 function RecordingScreen() {
-  const { recordingSeconds, incrementRecordingSeconds, setState } = useSOSStore()
+  const { recordingSeconds, incrementRecordingSeconds, setState, setAudioBlob } = useSOSStore()
   const maxRecordTime = 20
   const remainingTime = maxRecordTime - recordingSeconds
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const recordingStartedRef = useRef(false)
+  
+  useEffect(() => {
+    // Start recording only once on first mount
+    if (recordingStartedRef.current) return
+    recordingStartedRef.current = true
+    
+    const startRecording = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        const mediaRecorder = new MediaRecorder(stream)
+        mediaRecorderRef.current = mediaRecorder
+        audioChunksRef.current = []
+        
+        mediaRecorder.ondataavailable = (event) => {
+          audioChunksRef.current.push(event.data)
+        }
+        
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
+          setAudioBlob(audioBlob)
+        }
+        
+        mediaRecorder.start()
+      } catch (error) {
+        console.error("Failed to start recording:", error)
+        setState("idle")
+      }
+    }
+    
+    startRecording()
+    
+    return () => {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop()
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop())
+      }
+    }
+  }, [setState, setAudioBlob])
   
   useEffect(() => {
     const interval = setInterval(() => {
       incrementRecordingSeconds()
     }, 1000)
     
+    return () => clearInterval(interval)
+  }, [incrementRecordingSeconds])
+  
+  useEffect(() => {
     if (recordingSeconds >= maxRecordTime) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop()
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop())
+      }
       setState("processing")
     }
-    
-    return () => clearInterval(interval)
-  }, [recordingSeconds, incrementRecordingSeconds, setState])
+  }, [recordingSeconds, setState])
   
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-amber-500 px-6 py-12">
@@ -207,64 +254,54 @@ function WaitingScreen() {
   )
 }
 
-function createSilentWavBlob(durationSeconds = 1, sampleRate = 44100): Blob {
-  const channels = 1
-  const bitsPerSample = 16
-  const bytesPerSample = bitsPerSample / 8
-  const numSamples = durationSeconds * sampleRate
-  const blockAlign = channels * bytesPerSample
-  const byteRate = sampleRate * blockAlign
-  const dataSize = numSamples * blockAlign
-  const buffer = new ArrayBuffer(44 + dataSize)
-  const view = new DataView(buffer)
-
-  const writeString = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i += 1) {
-      view.setUint8(offset + i, value.charCodeAt(i))
-    }
-  }
-
-  writeString(0, "RIFF")
-  view.setUint32(4, 36 + dataSize, true)
-  writeString(8, "WAVE")
-  writeString(12, "fmt ")
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, channels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, byteRate, true)
-  view.setUint16(32, blockAlign, true)
-  view.setUint16(34, bitsPerSample, true)
-  writeString(36, "data")
-  view.setUint32(40, dataSize, true)
-
-  return new Blob([buffer], { type: "audio/wav" })
-}
-
 // Audio Player Component for Help Coming Screen
-function AudioPlayerSimple() {
+function AudioPlayerSimple({ audioBlob }: { audioBlob: Blob | null }) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   
   useEffect(() => {
-    if (isPlaying) {
-      const interval = setInterval(() => {
-        setProgress(prev => {
-          if (prev >= 100) {
-            setIsPlaying(false)
-            return 0
-          }
-          return prev + 5
-        })
-      }, 1000)
-      return () => clearInterval(interval)
+    if (!audioBlob) return
+    
+    const url = URL.createObjectURL(audioBlob)
+    const audio = new Audio(url)
+    audioRef.current = audio
+    
+    audio.addEventListener("loadedmetadata", () => {
+      setDuration(audio.duration)
+    })
+    
+    audio.addEventListener("timeupdate", () => {
+      setProgress((audio.currentTime / audio.duration) * 100)
+    })
+    
+    audio.addEventListener("ended", () => {
+      setIsPlaying(false)
+      setProgress(0)
+    })
+    
+    return () => {
+      URL.revokeObjectURL(url)
+      audio.pause()
     }
-  }, [isPlaying])
+  }, [audioBlob])
+  
+  const togglePlayback = () => {
+    if (!audioRef.current) return
+    
+    if (isPlaying) {
+      audioRef.current.pause()
+    } else {
+      audioRef.current.play()
+    }
+    setIsPlaying(!isPlaying)
+  }
   
   return (
     <div className="flex items-center gap-3 bg-white/10 rounded-lg p-3">
       <button
-        onClick={() => setIsPlaying(!isPlaying)}
+        onClick={togglePlayback}
         className="w-10 h-10 rounded-full bg-white flex items-center justify-center"
       >
         {isPlaying ? (
@@ -282,8 +319,8 @@ function AudioPlayerSimple() {
           />
         </div>
         <div className="flex justify-between mt-1 text-xs text-white/60">
-          <span>{Math.floor(progress / 5)}s</span>
-          <span>20s</span>
+          <span>{Math.floor(progress / 100 * duration)}s</span>
+          <span>{Math.floor(duration)}s</span>
         </div>
       </div>
       
@@ -326,7 +363,7 @@ function handleLocationError(error: GeolocationPositionError) {
 
 // Help Coming State Screen - แสดง Map + Audio
 function HelpComingScreen() {
-  const { location } = useSOSStore()
+  const { location, audioBlob } = useSOSStore()
   const parsedLocation = parseLocation(location)
   const lat = parsedLocation?.lat || 13.7563
   const lng = parsedLocation?.lng || 100.5018
@@ -371,8 +408,8 @@ function HelpComingScreen() {
         
         {/* Audio Recording */}
         <Card className="bg-white/10 border-none p-4 rounded-xl mb-4">
-          <p className="text-white/80 text-sm mb-3">ไฟล์เสียงที่บันทึก (20 วินาที)</p>
-          <AudioPlayerSimple />
+          <p className="text-white/80 text-sm mb-3">ไฟล์เสียงที่บันทึก</p>
+          <AudioPlayerSimple audioBlob={audioBlob} />
         </Card>
         
         {/* ETA Info */}
@@ -445,9 +482,15 @@ export default function SOSUserApp() {
       isSubmittingRef.current = true
       setProcessingError(null)
 
+      const { audioBlob } = useSOSStore.getState()
+      if (!audioBlob) {
+        setProcessingError("ไม่มีข้อมูลเสียง")
+        isSubmittingRef.current = false
+        return
+      }
+
       const parsed = parseLocation(location)
-      const wavBlob = createSilentWavBlob()
-      const file = new File([wavBlob], "recording.wav", { type: "audio/wav" })
+      const file = new File([audioBlob], "recording.webm", { type: "audio/webm" })
       const uploadRes = await uploadAudio.mutateAsync(file)
 
       const incidentRes = await createSOS.mutateAsync({

@@ -11,6 +11,7 @@ require (
 
 require (
 	github.com/fasthttp/websocket v1.5.3 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect

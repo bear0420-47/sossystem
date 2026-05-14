@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Play,
   Pause,
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { LocationMap } from "./location-map"
+import { resolveBackendAssetUrl } from "@/lib/api"
 import type { Incident, UrgentLevel, TicketStatus } from "@/lib/types"
 
 // Status badge colors
@@ -57,23 +58,79 @@ interface IncidentCardProps {
 }
 
 // Audio player component - max 20 seconds
-function AudioPlayer({ duration = 20 }: { audioUrl?: string; duration?: number }) {
+function AudioPlayer({ audioUrl, duration = 20 }: { audioUrl?: string; duration?: number; }) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const resolvedAudioUrl = audioUrl ? resolveBackendAssetUrl(audioUrl) : ""
   
   const maxDuration = Math.min(duration, 20)
+  
+  useEffect(() => {
+    if (!resolvedAudioUrl) {
+      setIsPlaying(false)
+      setProgress(0)
+      return
+    }
+
+    const audio = new Audio(resolvedAudioUrl)
+    audio.preload = "metadata"
+    audioRef.current = audio
+
+    const handleTimeUpdate = () => {
+      if (!audio.duration || Number.isNaN(audio.duration)) {
+        return
+      }
+
+      setProgress((audio.currentTime / audio.duration) * 100)
+    }
+
+    const handleEnded = () => {
+      setIsPlaying(false)
+      setProgress(0)
+    }
+
+    audio.addEventListener("timeupdate", handleTimeUpdate)
+    audio.addEventListener("ended", handleEnded)
+
+    return () => {
+      audio.pause()
+      audio.removeEventListener("timeupdate", handleTimeUpdate)
+      audio.removeEventListener("ended", handleEnded)
+      audioRef.current = null
+      setIsPlaying(false)
+      setProgress(0)
+    }
+  }, [resolvedAudioUrl])
   
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
+
+  const togglePlayback = async () => {
+    const audio = audioRef.current
+    if (!audio) {
+      return
+    }
+
+    if (isPlaying) {
+      audio.pause()
+      setIsPlaying(false)
+      return
+    }
+
+    await audio.play()
+    setIsPlaying(true)
+  }
   
   return (
     <div className="flex items-center gap-3 bg-muted/50 rounded-lg p-3">
       <button
-        onClick={() => setIsPlaying(!isPlaying)}
+        onClick={togglePlayback}
         className="w-10 h-10 rounded-full bg-primary flex items-center justify-center hover:bg-primary/90 transition-colors"
+        type="button"
       >
         {isPlaying ? (
           <Pause className="w-4 h-4 text-primary-foreground" />
@@ -309,7 +366,10 @@ export function IncidentDetail({ incident, onAcknowledge, onClose }: IncidentDet
         {/* Audio - max 20 seconds */}
         <div>
           <h3 className="text-sm font-medium mb-2">ไฟล์เสียง (สูงสุด 20 วินาที)</h3>
-          <AudioPlayer duration={Math.min(incident.audioDuration || 20, 20)} />
+          <AudioPlayer
+            audioUrl={incident.audioUrl}
+            duration={Math.min(incident.audioDuration || 20, 20)}
+          />
         </div>
         
         {/* Map with lat/lng - Real Leaflet Map */}

@@ -52,13 +52,25 @@ function parseLocationText(location: string): Location {
   }
 }
 
+export function resolveBackendAssetUrl(path: string): string {
+  if (!path) {
+    return path
+  }
+
+  if (/^(https?:)?\/\//i.test(path) || path.startsWith("data:") || path.startsWith("blob:")) {
+    return path
+  }
+
+  return `${API_BASE_URL}${path}`
+}
+
 function toIncident(ticket: BackendTicket): Incident {
   return {
     id: ticket.ticket_id,
     incidentNumber: ticket.ticket_id,
     userId: "",
     location: parseLocationText(ticket.location),
-    audioUrl: ticket.voice_clip,
+    audioUrl: resolveBackendAssetUrl(ticket.voice_clip),
     status: ticket.status,
     urgentLevel: ticket.urgent,
     createdAt: ticket.timestamp,

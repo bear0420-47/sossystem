@@ -3,11 +3,12 @@ package user
 import (
 	"fmt"
 	"mime/multipart"
-	"net/http"
 	"path/filepath"
+	"strings"
 
-	"github.com/google/uuid"
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 // allowedAudioTypes — MIME types ที่อนุญาตสำหรับไฟล์เสียง SOS
@@ -21,6 +22,7 @@ var allowedAudioTypes = map[string]bool{
 	"audio/ogg":       true, // .ogg
 	"audio/wav":       true, // .wav
 	"audio/webm":      true, // .webm audio (Android/Chrome)
+	"video/webm":      true, // WebM recordings are often detected as video/webm
 	"video/mp4":       true, // .m4a บางครั้ง detect เป็น video/mp4
 	"application/ogg": true, // .ogg variant
 }
@@ -47,20 +49,21 @@ func validateAudioFile(file *multipart.FileHeader) (string, error) {
 	}
 	defer f.Close()
 
-	// อ่าน 512 bytes แรกสำหรับ MIME detection (ตาม Fiber doc)
-	buf := make([]byte, 512)
-	n, err := f.Read(buf)
+	mtype, err := mimetype.DetectReader(f)
 	if err != nil {
-		return "", fmt.Errorf("cannot read file: %w", err)
+		return "", fmt.Errorf("cannot detect file type: %w", err)
 	}
 
-	mimeType := http.DetectContentType(buf[:n])
-
-	if !allowedAudioTypes[mimeType] {
-		return "", fmt.Errorf("file type '%s' is not allowed — only audio files are accepted", mimeType)
+	detected := strings.TrimSpace(mtype.String())
+	if semi := strings.IndexByte(detected, ';'); semi >= 0 {
+		detected = strings.TrimSpace(detected[:semi])
 	}
 
-	return mimeType, nil
+	if !allowedAudioTypes[detected] {
+		return "", fmt.Errorf("file type '%s' is not allowed — only audio files are accepted", detected)
+	}
+
+	return detected, nil
 }
 
 // UploadVoiceClip เป็น Fiber handler สำหรับรับไฟล์เสียงจาก client
