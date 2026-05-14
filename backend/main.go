@@ -17,10 +17,18 @@ import (
 	"github.com/joho/godotenv"
 )
 
+const uploadDir = "./uploads/voice"
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("[Config] No .env file found, using environment variables")
 	}
+
+	// ── สร้าง upload directory ถ้ายังไม่มี ────────────────────────────────
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		log.Fatalf("[Upload] Cannot create upload directory: %v", err)
+	}
+	log.Printf("[Upload] Voice files will be saved to: %s", uploadDir)
 
 	// ── Database ──────────────────────────────────────────────────────────
 	database.ConnectMongo()
@@ -33,15 +41,16 @@ func main() {
 	// ── Dependency injection ──────────────────────────────────────────────
 	repo := user.NewRepository()
 	svc := user.NewService(repo)
-	handler := user.NewHandler(svc)
+	handler := user.NewHandler(svc, uploadDir) // ← ส่ง uploadDir เข้าไป
 
-	// ── เริ่ม MongoDB Change Stream (real-time push ผ่าน SSE Hub) ─────────
+	// ── เริ่ม MongoDB Change Stream / Polling fallback ────────────────────
 	svc.StartChangeStream(ctx)
 
-	// ── Fiber (ไม่ต้องใช้ Streamable เพราะ SSE ใช้ SetBodyStreamWriter) ──
+	// ── Fiber ─────────────────────────────────────────────────────────────
 	app := fiber.New(fiber.Config{
 		AppName:               "SOS Emergency Response System",
 		StreamRequestBody:     true,
+		BodyLimit:             10 * 1024 * 1024, // 10MB — รองรับไฟล์เสียง
 		DisableStartupMessage: false,
 	})
 
@@ -52,6 +61,10 @@ func main() {
 		AllowHeaders: "Origin, Content-Type, Accept, Cache-Control",
 		AllowMethods: "GET, POST, PATCH, DELETE",
 	}))
+
+	// Serve ไฟล์เสียงที่ upload แล้ว (static files)
+	// เข้าถึงได้ที่ GET /uploads/voice/<filename>
+	app.Static("/uploads/voice", uploadDir)
 
 	// Health check
 	app.Get("/health", func(c *fiber.Ctx) error {

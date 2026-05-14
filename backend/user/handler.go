@@ -12,19 +12,21 @@ import (
 )
 
 type Handler struct {
-	svc Service
+	svc       Service
+	uploadDir string // directory สำหรับเก็บไฟล์เสียง เช่น "./uploads/voice"
 }
 
-func NewHandler(svc Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc Service, uploadDir string) *Handler {
+	return &Handler{svc: svc, uploadDir: uploadDir}
 }
 
 // RegisterRoutes mounts all SOS endpoints
 //
 // User routes:
-//   POST /api/v1/sos/tickets           → กด SOS สร้าง ticket
-//   GET  /api/v1/sos/tickets/:id        → ดูสถานะ ticket (fallback poll)
-//   GET  /api/v1/sos/tickets/:id/stream → SSE stream รับ status update แบบ real-time
+//   POST /api/v1/sos/upload-voice        → อัปโหลดไฟล์เสียง → ได้ voice_url กลับมา
+//   POST /api/v1/sos/tickets             → กด SOS สร้าง ticket (ใส่ voice_url จากขั้นตอนก่อน)
+//   GET  /api/v1/sos/tickets/:id         → ดูสถานะ ticket (fallback poll)
+//   GET  /api/v1/sos/tickets/:id/stream  → SSE stream รับ status update แบบ real-time
 //
 // Admin routes:
 //   GET   /api/v1/sos/admin/tickets                    → dashboard ดู ticket ทั้งหมด
@@ -36,14 +38,15 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	sos := router.Group("/sos")
 
 	// User
-	sos.Post("/tickets", h.CreateTicket)
+	sos.Post("/upload-voice", UploadVoiceClip(h.uploadDir)) // ← Step 1: upload ไฟล์เสียง
+	sos.Post("/tickets", h.CreateTicket)                    // ← Step 2: สร้าง ticket ด้วย voice_url
 	sos.Get("/tickets/:id", h.GetTicket)
 	sos.Get("/tickets/:id/stream", h.StreamTicketStatus) // ← SSE สำหรับ User
 
 	// Admin
 	admin := sos.Group("/admin")
 	admin.Get("/tickets", h.GetAllTickets)
-	admin.Get("/stream", h.StreamAllTickets)             // ← SSE สำหรับ Admin dashboard
+	admin.Get("/stream", h.StreamAllTickets) // ← SSE สำหรับ Admin dashboard
 	admin.Patch("/tickets/:id/acknowledge", h.AcknowledgeTicket)
 	admin.Patch("/tickets/:id/close", h.CloseTicket)
 	admin.Patch("/tickets/:id/urgent", h.SetUrgent)
@@ -89,21 +92,7 @@ func (h *Handler) GetTicket(c *fiber.Ctx) error {
 	}
 	return c.JSON(ticket)
 }
-
 // StreamTicketStatus handles GET /sos/tickets/:id/stream
-//
-// SSE endpoint สำหรับ User — เปิด connection ค้างไว้
-// Server จะ push event มาทุกครั้งที่ status ของ ticket นั้นเปลี่ยน
-//
-// SSE Event format:
-//
-//	data: {"operation":"update","ticket":{...}}\n\n
-//
-// States ที่ User จะได้รับ:
-//
-//	Pending    → หน้าจอสีเหลืองกะพริบ (กำลังส่งข้อมูล)
-//	In Progress → หน้าจอสีเขียว "กำลังมาช่วย"
-//	Closed     → ปิดหน้า SOS
 func (h *Handler) StreamTicketStatus(c *fiber.Ctx) error {
 	ticketID := c.Params("id")
 
