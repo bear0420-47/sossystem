@@ -3,6 +3,8 @@ package user
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"sos-system/database"
@@ -34,7 +36,7 @@ type repository struct {
 
 func NewRepository() Repository {
 	r := &repository{
-		col:        database.GetCollection(collectionName),
+		col: database.GetCollection(collectionName),
 		//counterCol: database.GetCollection(counterCollectionName),
 	}
 
@@ -104,13 +106,52 @@ func (r *repository) WatchChanges(ctx context.Context) (*mongo.ChangeStream, err
 }
 
 // GenerateTicketID creates a sequential ID like "SOS-0001"
-// Counts existing documents to produce the next number
+// Uses the highest existing numeric suffix so deleted rows do not cause duplicates.
 func (r *repository) GenerateTicketID(ctx context.Context) (string, error) {
-	count, err := r.col.CountDocuments(ctx, bson.M{})
+	cursor, err := r.col.Find(
+		ctx,
+		bson.M{},
+		options.Find().SetProjection(bson.M{"ticket_id": 1, "_id": 0}),
+	)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("SOS-%04d", count+1), nil
+	defer cursor.Close(ctx)
+
+	maxNumber := 0
+	for cursor.Next(ctx) {
+		var doc struct {
+			TicketID string `bson:"ticket_id"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return "", err
+		}
+
+		number := extractTicketNumber(doc.TicketID)
+		if number > maxNumber {
+			maxNumber = number
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("SOS-%04d", maxNumber+1), nil
+}
+
+func extractTicketNumber(ticketID string) int {
+	parts := strings.Split(ticketID, "-")
+	if len(parts) != 2 {
+		return 0
+	}
+
+	number, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+
+	return number
 }
 
 // toResponse converts internal Ticket model to the outgoing DTO
