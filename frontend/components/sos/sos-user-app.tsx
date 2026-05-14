@@ -1,12 +1,14 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Mic, MapPin, Play, Pause, Volume2 } from "lucide-react"
+import { Mic, Play, Pause, Volume2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { useSOSStore, type SOSState } from "@/stores/sos"
 import { LocationMap } from "./location-map"
 import { cn } from "@/lib/utils"
+import { useCreateSOS, useIncidentStatus, useUploadAudio } from "@/lib/hooks/use-sos"
+import { userApi } from "@/lib/api"
 
 // Sound wave animation component
 function SoundWave({ isRecording }: { isRecording: boolean }) {
@@ -137,36 +139,29 @@ function RecordingScreen() {
 }
 
 // Processing State Screen
-function ProcessingScreen() {
-  const { setState } = useSOSStore()
-  
+function ProcessingScreen({
+  onProcess,
+  error,
+}: {
+  onProcess: () => Promise<void>
+  error: string | null
+}) {
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setState("waiting")
-    }, 2000)
-    return () => clearTimeout(timer)
-  }, [setState])
+    onProcess()
+  }, [onProcess])
   
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-amber-500 px-6 py-12">
       <div className="animate-spin w-16 h-16 border-4 border-black/20 border-t-black rounded-full mb-8" />
       <h2 className="text-xl font-semibold text-black">กำลังส่งข้อมูล...</h2>
       <p className="text-black/60 text-sm mt-2">กรุณารอสักครู่</p>
+      {error && <p className="text-red-700 text-sm mt-3">{error}</p>}
     </div>
   )
 }
 
 // Waiting State Screen
 function WaitingScreen() {
-  const { setState } = useSOSStore()
-  
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setState("help-coming")
-    }, 5000)
-    return () => clearTimeout(timer)
-  }, [setState])
-  
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-emerald-500 px-6 py-12">
       <div className="flex flex-col items-center gap-2 mb-8">
@@ -210,6 +205,40 @@ function WaitingScreen() {
       </Button>
     </div>
   )
+}
+
+function createSilentWavBlob(durationSeconds = 1, sampleRate = 44100): Blob {
+  const channels = 1
+  const bitsPerSample = 16
+  const bytesPerSample = bitsPerSample / 8
+  const numSamples = durationSeconds * sampleRate
+  const blockAlign = channels * bytesPerSample
+  const byteRate = sampleRate * blockAlign
+  const dataSize = numSamples * blockAlign
+  const buffer = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buffer)
+
+  const writeString = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) {
+      view.setUint8(offset + i, value.charCodeAt(i))
+    }
+  }
+
+  writeString(0, "RIFF")
+  view.setUint32(4, 36 + dataSize, true)
+  writeString(8, "WAVE")
+  writeString(12, "fmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, channels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, bitsPerSample, true)
+  writeString(36, "data")
+  view.setUint32(40, dataSize, true)
+
+  return new Blob([buffer], { type: "audio/wav" })
 }
 
 // Audio Player Component for Help Coming Screen
@@ -371,7 +400,24 @@ function HelpComingScreen() {
 
 // Main SOS App Component
 export default function SOSUserApp() {
-  const { state, setState, setLocation, setRecordingSeconds } = useSOSStore()
+  const {
+    state,
+    setState,
+    setLocation,
+    setRecordingSeconds,
+    location,
+    currentIncident,
+    setCurrentIncident,
+  } = useSOSStore()
+  const [processingError, setProcessingError] = useState<string | null>(null)
+  const isSubmittingRef = useRef(false)
+  const createSOS = useCreateSOS()
+  const uploadAudio = useUploadAudio()
+
+  const statusQuery = useIncidentStatus(
+    currentIncident?.id ?? null,
+    !!currentIncident?.id && (state === "waiting" || state === "help-coming")
+  )
   
   useEffect(() => {
     if (navigator.geolocation) {
@@ -385,16 +431,81 @@ export default function SOSUserApp() {
   }, [setLocation])
   
   const handleSOSPress = useCallback(() => {
+    setProcessingError(null)
     setRecordingSeconds(0)
     setState("recording")
   }, [setState, setRecordingSeconds])
+
+  const processSOS = useCallback(async () => {
+    if (isSubmittingRef.current) {
+      return
+    }
+
+    try {
+      isSubmittingRef.current = true
+      setProcessingError(null)
+
+      const parsed = parseLocation(location)
+      const wavBlob = createSilentWavBlob()
+      const file = new File([wavBlob], "recording.wav", { type: "audio/wav" })
+      const uploadRes = await uploadAudio.mutateAsync(file)
+
+      const incidentRes = await createSOS.mutateAsync({
+        userId: "anonymous",
+        location: parsed ?? { lat: 13.7563, lng: 100.5018 },
+        audioUrl: uploadRes.voice_url,
+      })
+
+      setCurrentIncident(incidentRes.data)
+      setState("waiting")
+    } catch (error) {
+      setProcessingError(error instanceof Error ? error.message : "ส่งข้อมูลไม่สำเร็จ")
+      isSubmittingRef.current = false
+    }
+  }, [createSOS, location, setCurrentIncident, setState, uploadAudio])
+
+  useEffect(() => {
+    if (state !== "processing") {
+      isSubmittingRef.current = false
+    }
+  }, [state])
+
+  useEffect(() => {
+    const status = statusQuery.data?.data?.status
+    if (status === "In Progress") {
+      setState("help-coming")
+    }
+    if (status === "Closed") {
+      setState("idle")
+    }
+  }, [setState, statusQuery.data?.data?.status])
+
+  useEffect(() => {
+    if (!currentIncident?.id) {
+      return
+    }
+
+    const es = userApi.createTicketEventSource(currentIncident.id, (event) => {
+      const eventStatus = event?.ticket?.status
+      if (eventStatus === "In Progress") {
+        setState("help-coming")
+      }
+      if (eventStatus === "Closed") {
+        setState("idle")
+      }
+    })
+
+    return () => {
+      es.close()
+    }
+  }, [currentIncident?.id, setState])
   
   if (state === "recording") {
     return <RecordingScreen />
   }
   
   if (state === "processing") {
-    return <ProcessingScreen />
+    return <ProcessingScreen onProcess={processSOS} error={processingError} />
   }
   
   if (state === "waiting") {

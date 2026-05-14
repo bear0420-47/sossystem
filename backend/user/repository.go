@@ -13,6 +13,8 @@ import (
 )
 
 const collectionName = "tickets"
+const counterCollectionName = "counters"
+const ticketCounterKey = "ticket_id"
 
 type Repository interface {
 	Create(ctx context.Context, ticket *Ticket) error
@@ -25,13 +27,24 @@ type Repository interface {
 }
 
 type repository struct {
-	col *mongo.Collection
+	col        *mongo.Collection
+	counterCol *mongo.Collection
 }
 
 func NewRepository() Repository {
-	return &repository{
-		col: database.GetCollection(collectionName),
+	r := &repository{
+		col:        database.GetCollection(collectionName),
+		counterCol: database.GetCollection(counterCollectionName),
 	}
+
+	// Ensure ticket_id is unique even under high concurrency.
+	indexModel := mongo.IndexModel{
+		Keys:    bson.D{{Key: "ticket_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}
+	_, _ = r.col.Indexes().CreateOne(context.Background(), indexModel)
+
+	return r
 }
 
 // Create inserts a new SOS ticket into MongoDB
@@ -92,12 +105,27 @@ func (r *repository) WatchChanges(ctx context.Context) (*mongo.ChangeStream, err
 // GenerateTicketID creates a sequential ID like "SOS-0001"
 // Counts existing documents to produce the next number
 func (r *repository) GenerateTicketID(ctx context.Context) (string, error) {
-	count, err := r.col.CountDocuments(ctx, bson.M{})
+	filter := bson.M{"_id": ticketCounterKey}
+	update := bson.M{"$inc": bson.M{"seq": 1}}
+	opts := options.FindOneAndUpdate().
+		SetUpsert(true).
+		SetReturnDocument(options.After)
+
+	var result struct {
+		ID  string `bson:"_id"`
+		Seq int64  `bson:"seq"`
+	}
+
+	err := r.counterCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 	if err != nil {
 		return "", err
 	}
-	nextNum := count + 1
-	return fmt.Sprintf("SOS-%04d", nextNum), nil
+
+	if result.Seq <= 0 {
+		return "", fmt.Errorf("invalid ticket sequence value")
+	}
+
+	return fmt.Sprintf("SOS-%04d", result.Seq), nil
 }
 
 // toResponse converts internal Ticket model to the outgoing DTO

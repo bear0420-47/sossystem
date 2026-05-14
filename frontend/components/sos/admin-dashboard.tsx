@@ -16,50 +16,12 @@ import { Input } from "@/components/ui/input"
 import { IncidentCard, IncidentDetail } from "./incident-card"
 import { useUIStore } from "@/stores/ui"
 import type { Incident, TicketStatus, UrgentLevel } from "@/lib/types"
-
-// Mock data for demo - audioDuration max 20 seconds
-const mockIncidents: Incident[] = [
-  {
-    id: "1",
-    incidentNumber: "INC-8890",
-    userId: "user-001",
-    userName: "User 001",
-    location: { lat: 13.756331, lng: 100.501762 },
-    audioUrl: "/audio/sos-1.mp3",
-    audioDuration: 18,
-    status: "Pending",
-    urgentLevel: "Critical",
-    createdAt: "2024-02-12T14:25:00Z",
-    updatedAt: "2024-02-12T14:25:00Z",
-  },
-  {
-    id: "2",
-    incidentNumber: "INC-8891",
-    userId: "user-002",
-    userName: "User 002",
-    location: { lat: 13.746936, lng: 100.534927 },
-    audioUrl: "/audio/sos-2.mp3",
-    audioDuration: 20,
-    status: "In Progress",
-    urgentLevel: "High",
-    createdAt: "2024-02-12T14:38:00Z",
-    updatedAt: "2024-02-12T14:40:00Z",
-    acknowledgedAt: "2024-02-12T14:40:00Z",
-  },
-  {
-    id: "3",
-    incidentNumber: "INC-8892",
-    userId: "user-003",
-    userName: "User 003",
-    location: { lat: 13.738062, lng: 100.560791 },
-    audioUrl: "/audio/sos-3.mp3",
-    audioDuration: 15,
-    status: "Pending",
-    urgentLevel: "Medium",
-    createdAt: "2024-02-12T14:55:00Z",
-    updatedAt: "2024-02-12T14:55:00Z",
-  },
-]
+import {
+  useIncidents,
+  useAcknowledgeIncident,
+  useCloseIncident,
+  useUpdateIncident,
+} from "@/lib/hooks/use-incidents"
 
 // Stats Card Component
 function StatsCard({
@@ -133,15 +95,42 @@ function FilterTabs({
 export default function AdminDashboard() {
   const [filter, setFilter] = useState("all")
   const [searchQuery, setSearchQuery] = useState("")
-  const [incidents, setIncidents] = useState(mockIncidents)
   const { selectedIncidentId, setSelectedIncidentId } = useUIStore()
+
+  const statusFilter =
+    filter === "pending"
+      ? "Pending"
+      : filter === "in-progress"
+      ? "In Progress"
+      : filter === "closed"
+      ? "Closed"
+      : undefined
+
+  const { data, isLoading, isError } = useIncidents({ status: statusFilter })
+  const acknowledgeMutation = useAcknowledgeIncident()
+  const closeMutation = useCloseIncident()
+  const updateMutation = useUpdateIncident()
+
+  const incidents = data?.data ?? []
   
   // Filter incidents
   const filteredIncidents = incidents.filter((incident) => {
-    if (filter === "pending") return incident.status === "Pending"
-    if (filter === "in-progress") return incident.status === "In Progress"
-    if (filter === "closed") return incident.status === "Closed"
-    return true
+    const matchesFilter =
+      filter === "pending"
+        ? incident.status === "Pending"
+        : filter === "in-progress"
+        ? incident.status === "In Progress"
+        : filter === "closed"
+        ? incident.status === "Closed"
+        : true
+
+    const q = searchQuery.trim().toLowerCase()
+    const matchesSearch =
+      q.length === 0 ||
+      incident.incidentNumber.toLowerCase().includes(q) ||
+      incident.id.toLowerCase().includes(q)
+
+    return matchesFilter && matchesSearch
   })
   
   // Get selected incident
@@ -153,19 +142,12 @@ export default function AdminDashboard() {
   
   // Handlers
   const handleAcknowledge = (id: string, urgentLevel: UrgentLevel) => {
-    setIncidents(prev => prev.map(inc => 
-      inc.id === id 
-        ? { ...inc, status: "In Progress" as TicketStatus, urgentLevel, acknowledgedAt: new Date().toISOString() }
-        : inc
-    ))
+    updateMutation.mutate({ id, payload: { urgentLevel } })
+    acknowledgeMutation.mutate(id)
   }
   
   const handleClose = (id: string) => {
-    setIncidents(prev => prev.map(inc => 
-      inc.id === id 
-        ? { ...inc, status: "Closed" as TicketStatus, closedAt: new Date().toISOString() }
-        : inc
-    ))
+    closeMutation.mutate(id)
   }
   
   return (
@@ -246,6 +228,14 @@ export default function AdminDashboard() {
           
           {/* Incident grid */}
           <div className="flex-1 overflow-y-auto p-4">
+            {isLoading && (
+              <div className="text-sm text-muted-foreground mb-3">กำลังโหลดข้อมูล...</div>
+            )}
+
+            {isError && (
+              <div className="text-sm text-red-500 mb-3">โหลดข้อมูลจาก backend ไม่สำเร็จ</div>
+            )}
+
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
               {filteredIncidents.map((incident) => (
                 <IncidentCard
@@ -267,13 +257,6 @@ export default function AdminDashboard() {
             )}
           </div>
           
-          {/* Footer */}
-          <div className="p-4 border-t border-border text-center">
-            <p className="text-sm text-muted-foreground flex items-center justify-center gap-2">
-              <span className="inline-block w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-              อัปเดตข้อมูลอัตโนมัติ
-            </p>
-          </div>
         </div>
         
         {/* Right panel - Detail view */}
