@@ -25,5 +25,5 @@ type TicketResponse struct {
 	Urgent    UrgentLevel  `json:"urgent"`
 	Location  string       `json:"location"`
 	VoiceClip string       `json:"voice_clip"`
-	Timestamp string       `json:"timestamp"` // formatted: "2006-01-02 15:04:05"
+	Timestamp string       `json:"timestamp"` // RFC3339 timestamp in Asia/Bangkok
 }

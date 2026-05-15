@@ -19,6 +19,21 @@ const collectionName = "tickets"
 // const counterCollectionName = "counters"
 const ticketCounterKey = "ticket_id"
 
+var bangkokLocation = loadBangkokLocation()
+
+func loadBangkokLocation() *time.Location {
+	location, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		return time.FixedZone("Asia/Bangkok", 7*60*60)
+	}
+
+	return location
+}
+
+func formatBangkokTime(t time.Time) string {
+	return t.In(bangkokLocation).Format(time.RFC3339)
+}
+
 type Repository interface {
 	Create(ctx context.Context, ticket *Ticket) error
 	FindAll(ctx context.Context) ([]Ticket, error)
@@ -162,6 +177,6 @@ func toResponse(t Ticket) TicketResponse {
 		Urgent:    t.Urgent,
 		Location:  t.Location,
 		VoiceClip: t.VoiceClip,
-		Timestamp: t.Timestamp.Format(time.DateTime), // "2006-01-02 15:04:05"
+		Timestamp: formatBangkokTime(t.Timestamp),
 	}
 }

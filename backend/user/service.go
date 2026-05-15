@@ -123,7 +123,7 @@ func (s *service) CreateTicket(ctx context.Context, req CreateTicketRequest) (*T
 		Urgent:    UrgentNone,
 		Location:  req.Location,
 		VoiceClip: req.VoiceClip,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UTC(),
 	}
 
 	if err := s.repo.Create(ctx, ticket); err != nil {
@@ -222,7 +222,7 @@ func (s *service) SetUrgent(ctx context.Context, ticketID string, urgent UrgentL
 
 // GetCurrentTime คืนเวลาเซิร์ฟเวอร์ปัจจุบัน (RFC3339)
 func (s *service) GetCurrentTime(ctx context.Context) (string, error) {
-	return time.Now().Format(time.RFC3339), nil
+	return time.Now().In(bangkokLocation).Format(time.RFC3339), nil
 }
 
 // StartChangeStream — ฟัง MongoDB Change Stream แล้ว broadcast ผ่าน SSE Hub
