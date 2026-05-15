@@ -52,6 +52,17 @@ function parseLocationText(location: string): Location {
   }
 }
 
+function joinBackendUrl(baseUrl: string, path: string): string {
+  const trimmedBaseUrl = baseUrl.replace(/\/$/, "")
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`
+
+  if (!trimmedBaseUrl) {
+    return normalizedPath
+  }
+
+  return `${trimmedBaseUrl}${normalizedPath}`
+}
+
 export function resolveBackendAssetUrl(path: string): string {
   if (!path) {
     return path
@@ -61,7 +72,7 @@ export function resolveBackendAssetUrl(path: string): string {
     return path
   }
 
-  return `${API_BASE_URL}${path}`
+  return joinBackendUrl(API_BASE_URL, path)
 }
 
 function toIncident(ticket: BackendTicket): Incident {
@@ -91,7 +102,7 @@ async function fetchApi<T>(
   endpoint: string,
   options?: RequestInit
 ): Promise<T> {
-  const url = `${API_BASE_URL}${endpoint}`
+  const url = joinBackendUrl(API_BASE_URL, endpoint)
 
   const response = await fetch(url, {
     ...options,

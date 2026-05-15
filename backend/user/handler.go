@@ -23,17 +23,19 @@ func NewHandler(svc Service, uploadDir string) *Handler {
 // RegisterRoutes mounts all SOS endpoints
 //
 // User routes:
-//   POST /api/v1/sos/upload-voice        → อัปโหลดไฟล์เสียง → ได้ voice_url กลับมา
-//   POST /api/v1/sos/tickets             → กด SOS สร้าง ticket (ใส่ voice_url จากขั้นตอนก่อน)
-//   GET  /api/v1/sos/tickets/:id         → ดูสถานะ ticket (fallback poll)
-//   GET  /api/v1/sos/tickets/:id/stream  → SSE stream รับ status update แบบ real-time
+//
+//	POST /api/v1/sos/upload-voice        → อัปโหลดไฟล์เสียง → ได้ voice_url กลับมา
+//	POST /api/v1/sos/tickets             → กด SOS สร้าง ticket (ใส่ voice_url จากขั้นตอนก่อน)
+//	GET  /api/v1/sos/tickets/:id         → ดูสถานะ ticket (fallback poll)
+//	GET  /api/v1/sos/tickets/:id/stream  → SSE stream รับ status update แบบ real-time
 //
 // Admin routes:
-//   GET   /api/v1/sos/admin/tickets                    → dashboard ดู ticket ทั้งหมด
-//   GET   /api/v1/sos/admin/stream                     → SSE stream รับ ticket ใหม่แบบ real-time
-//   PATCH /api/v1/sos/admin/tickets/:id/acknowledge    → Pending → In Progress
-//   PATCH /api/v1/sos/admin/tickets/:id/close          → → Closed
-//   PATCH /api/v1/sos/admin/tickets/:id/urgent         → ตั้งระดับความเร่งด่วน
+//
+//	GET   /api/v1/sos/admin/tickets                    → dashboard ดู ticket ทั้งหมด
+//	GET   /api/v1/sos/admin/stream                     → SSE stream รับ ticket ใหม่แบบ real-time
+//	PATCH /api/v1/sos/admin/tickets/:id/acknowledge    → Pending → In Progress
+//	PATCH /api/v1/sos/admin/tickets/:id/close          → → Closed
+//	PATCH /api/v1/sos/admin/tickets/:id/urgent         → ตั้งระดับความเร่งด่วน
 func (h *Handler) RegisterRoutes(router fiber.Router) {
 	sos := router.Group("/sos")
 
@@ -41,6 +43,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	sos.Post("/upload-voice", UploadVoiceClip(h.uploadDir)) // ← Step 1: upload ไฟล์เสียง
 	sos.Post("/tickets", h.CreateTicket)                    // ← Step 2: สร้าง ticket ด้วย voice_url
 	sos.Get("/tickets/:id", h.GetTicket)
+	sos.Get("/time", h.GetCurrentTime)
 	sos.Get("/tickets/:id/stream", h.StreamTicketStatus) // ← SSE สำหรับ User
 
 	// Admin
@@ -64,7 +67,7 @@ func (h *Handler) CreateTicket(c *fiber.Ctx) error {
 		})
 	}
 
-	if  req.Location == "" || req.VoiceClip == "" {
+	if req.Location == "" || req.VoiceClip == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "location, and voice_clip are required",
 		})
@@ -92,6 +95,7 @@ func (h *Handler) GetTicket(c *fiber.Ctx) error {
 	}
 	return c.JSON(ticket)
 }
+
 // StreamTicketStatus handles GET /sos/tickets/:id/stream
 func (h *Handler) StreamTicketStatus(c *fiber.Ctx) error {
 	ticketID := c.Params("id")
@@ -294,4 +298,13 @@ func (h *Handler) SetUrgent(c *fiber.Ctx) error {
 		})
 	}
 	return c.JSON(ticket)
+}
+
+// GetCurrentTime handles GET /sos/time and returns server time
+func (h *Handler) GetCurrentTime(c *fiber.Ctx) error {
+	t, err := h.svc.GetCurrentTime(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"time": t})
 }

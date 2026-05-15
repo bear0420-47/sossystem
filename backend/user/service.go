@@ -88,6 +88,8 @@ type Service interface {
 	AcknowledgeTicket(ctx context.Context, ticketID string) (*TicketResponse, error)
 	CloseTicket(ctx context.Context, ticketID string) (*TicketResponse, error)
 	SetUrgent(ctx context.Context, ticketID string, urgent UrgentLevel) (*TicketResponse, error)
+	// GetCurrentTime returns the current server time formatted as RFC3339
+	GetCurrentTime(ctx context.Context) (string, error)
 	StartChangeStream(ctx context.Context)
 	GetHub() *Hub
 }
@@ -216,6 +218,11 @@ func (s *service) SetUrgent(ctx context.Context, ticketID string, urgent UrgentL
 	resp := toResponse(*ticket)
 	log.Printf("[SOS] Ticket %s urgency → %s", ticketID, urgent)
 	return &resp, nil
+}
+
+// GetCurrentTime คืนเวลาเซิร์ฟเวอร์ปัจจุบัน (RFC3339)
+func (s *service) GetCurrentTime(ctx context.Context) (string, error) {
+	return time.Now().Format(time.RFC3339), nil
 }
 
 // StartChangeStream — ฟัง MongoDB Change Stream แล้ว broadcast ผ่าน SSE Hub
