@@ -57,25 +57,34 @@ interface IncidentCardProps {
   onClose?: (id: string) => void
 }
 
-// Audio player component - max 20 seconds
-function AudioPlayer({ audioUrl, duration = 20 }: { audioUrl?: string; duration?: number; }) {
+// Audio player component - uses the real audio duration when metadata loads
+function AudioPlayer({ audioUrl, duration = 0 }: { audioUrl?: string; duration?: number }) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [audioDuration, setAudioDuration] = useState(duration)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const resolvedAudioUrl = audioUrl ? resolveBackendAssetUrl(audioUrl) : ""
-  
-  const maxDuration = Math.min(duration, 20)
-  
+  const cacheBustedAudioUrl = resolvedAudioUrl
+    ? `${resolvedAudioUrl}${resolvedAudioUrl.includes("?") ? "&" : "?"}v=${encodeURIComponent(duration || 0)}`
+    : ""
+
   useEffect(() => {
-    if (!resolvedAudioUrl) {
+    if (!cacheBustedAudioUrl) {
       setIsPlaying(false)
       setProgress(0)
+      setAudioDuration(duration)
       return
     }
 
-    const audio = new Audio(resolvedAudioUrl)
+    const audio = new Audio(cacheBustedAudioUrl)
     audio.preload = "metadata"
     audioRef.current = audio
+
+    const handleLoadedMetadata = () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setAudioDuration(audio.duration)
+      }
+    }
 
     const handleTimeUpdate = () => {
       if (!audio.duration || Number.isNaN(audio.duration)) {
@@ -90,18 +99,23 @@ function AudioPlayer({ audioUrl, duration = 20 }: { audioUrl?: string; duration?
       setProgress(0)
     }
 
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata)
+    audio.addEventListener("durationchange", handleLoadedMetadata)
     audio.addEventListener("timeupdate", handleTimeUpdate)
     audio.addEventListener("ended", handleEnded)
 
     return () => {
       audio.pause()
+      audio.removeEventListener("loadedmetadata", handleLoadedMetadata)
+      audio.removeEventListener("durationchange", handleLoadedMetadata)
       audio.removeEventListener("timeupdate", handleTimeUpdate)
       audio.removeEventListener("ended", handleEnded)
       audioRef.current = null
       setIsPlaying(false)
       setProgress(0)
+      setAudioDuration(duration)
     }
-  }, [resolvedAudioUrl])
+  }, [cacheBustedAudioUrl, duration])
   
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -147,8 +161,8 @@ function AudioPlayer({ audioUrl, duration = 20 }: { audioUrl?: string; duration?
           />
         </div>
         <div className="flex justify-between mt-1 text-xs text-muted-foreground">
-          <span>{formatTime((progress / 100) * maxDuration)}</span>
-          <span>{formatTime(maxDuration)}</span>
+          <span>{formatTime((progress / 100) * audioDuration)}</span>
+          <span>{formatTime(audioDuration)}</span>
         </div>
       </div>
       
@@ -241,11 +255,11 @@ export function IncidentCard({
         {/* Map preview - lat/lng only */}
         <MiniMap location={incident.location} />
         
-        {/* Audio player - max 20 seconds */}
+        {/* Audio player - uses the actual clip duration */}
         {incident.audioUrl && (
           <AudioPlayer
             audioUrl={incident.audioUrl}
-            duration={Math.min(incident.audioDuration || 20, 20)}
+            duration={incident.audioDuration}
           />
         )}
         

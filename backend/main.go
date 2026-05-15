@@ -62,6 +62,13 @@ func main() {
 		AllowMethods: "GET, POST, PATCH, DELETE",
 	}))
 
+	app.Use("/uploads/voice", func(c *fiber.Ctx) error {
+		c.Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+		c.Set("Pragma", "no-cache")
+		c.Set("Expires", "0")
+		return c.Next()
+	})
+
 	// Serve ไฟล์เสียงที่ upload แล้ว (static files)
 	// เข้าถึงได้ที่ GET /uploads/voice/<filename>
 	app.Static("/uploads/voice", uploadDir)
