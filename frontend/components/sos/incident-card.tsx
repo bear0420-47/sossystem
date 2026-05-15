@@ -233,7 +233,14 @@ export function IncidentCard({
       onClick={() => onSelect?.(incident)}
     >
       <CardHeader className="p-4 pb-2">
-        <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-primary">#{incident.incidentNumber}</h3>
+            <div className="text-xs text-muted-foreground" suppressHydrationWarning>
+              {formattedTime} | {formattedDate}
+            </div>
+          </div>
+
           <div className="flex items-center gap-2">
             {incident.urgentLevel === "Critical" && (
               <AlertTriangle className="w-4 h-4 text-red-500" />
@@ -244,9 +251,6 @@ export function IncidentCard({
             <Badge variant="outline" className={statusColors[incident.status]}>
               {incident.status}
             </Badge>
-          </div>
-          <div className="text-xs text-muted-foreground" suppressHydrationWarning>
-            {formattedTime} | {formattedDate}
           </div>
         </div>
       </CardHeader>

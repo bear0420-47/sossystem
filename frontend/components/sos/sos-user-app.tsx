@@ -168,6 +168,26 @@ function RecordingScreen() {
           <span className="text-6xl font-bold text-black">{remainingTime}</span>
           <p className="text-black/60 text-sm mt-2">วินาที</p>
         </div>
+        <div className="mt-6">
+          <Button
+            variant="destructive"
+            className="w-full"
+            onClick={() => {
+              // Stop recording early and proceed to processing/upload
+              if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+                try {
+                  mediaRecorderRef.current.stop()
+                  mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop())
+                } catch (e) {
+                  console.error("Error stopping recorder:", e)
+                }
+              }
+              setState("processing")
+            }}
+          >
+            หยุดและส่ง
+          </Button>
+        </div>
         
         <p className="text-center text-black/50 text-xs mt-6">
           กรุณาอธิบายสถานการณ์ให้ชัดเจน
